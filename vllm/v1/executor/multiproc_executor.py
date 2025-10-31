@@ -328,9 +328,7 @@ class MultiprocExecutor(Executor):
 
     @cached_property
     def max_concurrent_batches(self) -> int:
-        if self.scheduler_config.async_scheduling:
-            return 2
-        return self.parallel_config.pipeline_parallel_size
+        return 1
 
     def _get_output_rank(self) -> int:
         # Only returns ModelRunnerOutput from TP rank=0 and PP rank=-1
