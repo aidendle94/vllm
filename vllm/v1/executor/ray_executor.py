@@ -596,7 +596,7 @@ class RayDistributedExecutor(Executor):
         return forward_dag.experimental_compile(
             enable_asyncio=enable_asyncio,
             _overlap_gpu_communication=envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM,
-            _max_inflight_executes=self.parallel_config.pipeline_parallel_size,
+            _max_inflight_executions=self.parallel_config.pipeline_parallel_size,
         )
 
     def __del__(self):
