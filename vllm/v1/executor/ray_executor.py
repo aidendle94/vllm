@@ -105,10 +105,15 @@ class RayDistributedExecutor(Executor):
     def max_concurrent_batches(self) -> int:
         """Ray distributed executor supports pipeline parallelism,
         meaning that it allows PP size batches to be executed concurrently.
+
+        However, Ray compiled DAG channels cannot guarantee synchronization
+        when more than 2 batches are in-flight, especially with PP > 2.
+        This causes RayChannelTimeoutError. Cap at 2 to maintain stability.
         """
         if self.scheduler_config.async_scheduling:
             return 2
-        return self.parallel_config.pipeline_parallel_size
+        # Cap at 2 even for non-async to prevent Ray channel sync issues with PP > 2
+        return min(2, self.parallel_config.pipeline_parallel_size)
 
     def shutdown(self) -> None:
         if logger:
@@ -596,7 +601,7 @@ class RayDistributedExecutor(Executor):
         return forward_dag.experimental_compile(
             enable_asyncio=enable_asyncio,
             _overlap_gpu_communication=envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM,
-            _max_inflight_executions=self.parallel_config.pipeline_parallel_size,
+            _max_inflight_executions=2,  # Ray channels can't sync > 2 batches with PP
         )
 
     def __del__(self):
