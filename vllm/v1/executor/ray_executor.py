@@ -103,19 +103,16 @@ class RayDistributedExecutor(Executor):
 
     @property
     def max_concurrent_batches(self) -> int:
-        """Ray distributed executor supports pipeline parallelism,
-        meaning that it allows PP size batches to be executed concurrently.
+        """Number of concurrent batches supported by the executor.
 
-        However, Ray compiled DAG channels have reliability issues with
-        multi-node PP > 2, causing RayChannelTimeoutError and channel crashes.
-        Workaround: Force to 1 for stability with multi-node PP > 2.
-        TODO: Investigate Ray channel failures and find proper fix.
+        Align with other backends: when async scheduling is enabled, allow up
+        to 2 concurrent batches to maximize overlap; otherwise allow up to the
+        pipeline parallel size. Thread‑safety is enforced at the engine level
+        via a bounded, thread‑safe batch queue.
         """
         if self.scheduler_config.async_scheduling:
             return 2
-        # WORKAROUND: For multi-node PP > 2, only max_concurrent_batches=1 is stable
-        # due to Ray compiled DAG channel failures
-        return 1
+        return self.parallel_config.pipeline_parallel_size
 
     def shutdown(self) -> None:
         if logger:

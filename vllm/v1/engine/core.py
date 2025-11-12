@@ -170,16 +170,19 @@ class EngineCore:
                 kv_connector.set_xfer_handshake_metadata(content)
 
         # Setup batch queue for pipeline parallelism.
-        # Batch queue for scheduled batches. This enables us to asynchronously
-        # schedule and execute batches, and is required by pipeline parallelism
-        # to eliminate pipeline bubbles.
+        # Use a thread-safe, bounded queue to coordinate producer/consumer
+        # scheduling and model output consumption across threads.
+        # This restores the synchronization guarantees required for
+        # distributed execution backends (e.g., Ray compiled DAG channels).
         self.batch_queue_size = self.model_executor.max_concurrent_batches
         self.batch_queue: (
-            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput]] | None
+            queue.Queue[tuple[Future[ModelRunnerOutput | None], SchedulerOutput]]
+            | None
         ) = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d", self.batch_queue_size)
-            self.batch_queue = deque(maxlen=self.batch_queue_size)
+            # Bounded capacity provides natural back-pressure.
+            self.batch_queue = queue.Queue(maxsize=self.batch_queue_size)
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
         if (
@@ -366,14 +369,12 @@ class EngineCore:
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
-        # Try to schedule a new batch if the batch queue is not full, but
-        # the scheduler may return an empty batch if all requests are scheduled.
-        # Note that this is not blocking.
-        assert len(batch_queue) < self.batch_queue_size
+        # Try to schedule a new batch if the batch queue is not full. The
+        # scheduler may return an empty batch if all requests are scheduled.
 
         model_executed = False
         deferred_scheduler_output = None
-        if self.scheduler.has_requests():
+        if self.scheduler.has_requests() and not batch_queue.full():
             with record_function_or_nullcontext("core step_with_batch_queue: schedule"):
                 scheduler_output = self.scheduler.schedule()
             with record_function_or_nullcontext(
@@ -420,25 +421,20 @@ class EngineCore:
                 else:
                     # No sampling required (e.g. all requests finished).
                     future = cast(Future[ModelRunnerOutput], exec_future)
-                # Add this step's future to the queue.
-                batch_queue.appendleft((future, scheduler_output))
-                if (
-                    model_executed
-                    and len(batch_queue) < self.batch_queue_size
-                    and not batch_queue[-1][0].done()
-                ):
-                    # Don't block on next worker response unless the queue is full
-                    # or there are no more requests to schedule.
-                    return None, True
+                # Add this step's future to the queue (blocks if full, but
+                # we already checked !full above).
+                batch_queue.put((future, scheduler_output), block=True)
+                # Prioritize filling the pipeline when possible.
+                return None, True
 
-        elif not batch_queue:
+        elif batch_queue.empty():
             # Queue is empty. We should not reach here since this method should
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
             return None, False
         with record_function_or_nullcontext("core step_with_batch_queue: model_output"):
             # Block until the next result is available.
-            future, scheduler_output = batch_queue.pop()
+            future, scheduler_output = batch_queue.get(block=True)
             with self.log_error_detail(scheduler_output):
                 model_output = future.result()
         with record_function_or_nullcontext(
@@ -463,7 +459,7 @@ class EngineCore:
                 future = self.model_executor.sample_tokens(
                     grammar_output, non_block=True
                 )
-                batch_queue.appendleft((future, deferred_scheduler_output))
+                batch_queue.put((future, deferred_scheduler_output), block=True)
 
         return engine_core_outputs, model_executed
 
@@ -881,7 +877,7 @@ class EngineCoreProc(EngineCore):
         while (
             not self.engines_running
             and not self.scheduler.has_requests()
-            and not self.batch_queue
+            and (self.batch_queue is None or self.batch_queue.empty())
         ):
             if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
                 logger.debug("EngineCore waiting for work.")
