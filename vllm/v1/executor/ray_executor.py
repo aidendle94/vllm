@@ -4,7 +4,8 @@
 import os
 from collections import defaultdict
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import BoundedSemaphore
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -101,15 +102,15 @@ class RayDistributedExecutor(Executor):
 
         self.scheduler_output: SchedulerOutput | None = None
 
+        dag_slots = max(1, self.max_concurrent_batches)
+        self._dag_submit_sem = BoundedSemaphore(dag_slots)
+        self._dag_submit_pool = ThreadPoolExecutor(
+            max_workers=dag_slots, thread_name_prefix="RayDagSubmit"
+        )
+
     @property
     def max_concurrent_batches(self) -> int:
-        """Number of concurrent batches supported by the executor.
-
-        Align with other backends: when async scheduling is enabled, allow up
-        to 2 concurrent batches to maximize overlap; otherwise allow up to the
-        pipeline parallel size. Thread‑safety is enforced at the engine level
-        via a bounded, thread‑safe batch queue.
-        """
+        """Number of concurrent batches supported by the executor."""
         if self.scheduler_config.async_scheduling:
             return 2
         return self.parallel_config.pipeline_parallel_size
@@ -122,6 +123,10 @@ class RayDistributedExecutor(Executor):
                 "from logging.cc regarding SIGTERM received, please ignore "
                 "because this is the expected termination process in Ray."
             )
+        if hasattr(self, "_dag_submit_pool") and self._dag_submit_pool is not None:
+            self._dag_submit_pool.shutdown(wait=False)
+            self._dag_submit_pool = None
+        self._dag_submit_sem = None
         if hasattr(self, "forward_dag") and self.forward_dag is not None:
             self.forward_dag.teardown()
             import ray
@@ -425,30 +430,80 @@ class RayDistributedExecutor(Executor):
 
         self.scheduler_output = None
 
-        # Build the compiled DAG for the first time.
-        if self.forward_dag is None:  # type: ignore
+        if non_block:
+            return self._submit_compiled_dag_async(scheduler_output, grammar_output)
+
+        return self._execute_compiled_dag_blocking(scheduler_output, grammar_output)
+
+    def _execute_compiled_dag_blocking(
+        self,
+        scheduler_output: SchedulerOutput,
+        grammar_output: "GrammarOutput | None",
+    ) -> ModelRunnerOutput | None:
+        semaphore = getattr(self, "_dag_submit_sem", None)
+        if semaphore is None:
+            return self._run_compiled_dag_once(scheduler_output, grammar_output)
+
+        semaphore.acquire()
+        try:
+            return self._run_compiled_dag_once(scheduler_output, grammar_output)
+        finally:
+            semaphore.release()
+
+    def _submit_compiled_dag_async(
+        self,
+        scheduler_output: SchedulerOutput,
+        grammar_output: "GrammarOutput | None",
+    ) -> Future[ModelRunnerOutput | None]:
+        pool = getattr(self, "_dag_submit_pool", None)
+        semaphore = getattr(self, "_dag_submit_sem", None)
+        if pool is None or semaphore is None:
+            return self._immediate_future(
+                scheduler_output, grammar_output
+            )
+
+        semaphore.acquire()
+
+        def task():
+            try:
+                return self._run_compiled_dag_once(scheduler_output, grammar_output)
+            finally:
+                semaphore.release()
+
+        return pool.submit(task)
+
+    def _run_compiled_dag_once(
+        self,
+        scheduler_output: SchedulerOutput,
+        grammar_output: "GrammarOutput | None",
+    ) -> ModelRunnerOutput | None:
+        if self.forward_dag is None:  # type: ignore[truthy-functional]
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
         refs = self.forward_dag.execute((scheduler_output, grammar_output))  # type: ignore
 
         if not self.has_connector:
-            # Get output only from a single worker (output_rank)
-            # When PP is not used, we block here until the result is available.
-            if not non_block:
-                return refs[0].get()
+            # Return only the primary worker output (output_rank=0) to match
+            # previous semantics.
+            return refs[0].get()
 
-            # When PP is used, we return a FutureWrapper immediately so that
-            # the scheduler can yield to the next batch.
-            return FutureWrapper(refs[0])
-
-        # Get output from all workers when connector is present
         assert self.kv_output_aggregator is not None
-        if not non_block:
-            # Block and get results from all workers
-            return self.kv_output_aggregator.aggregate(ray.get(refs))
+        outputs = ray.get(refs)
+        return self.kv_output_aggregator.aggregate(outputs)
 
-        # Return a future that will aggregate outputs from all workers
-        return FutureWrapper(refs, self.kv_output_aggregator)
+    def _immediate_future(
+        self,
+        scheduler_output: SchedulerOutput,
+        grammar_output: "GrammarOutput | None",
+    ) -> Future[ModelRunnerOutput | None]:
+        future: Future[ModelRunnerOutput | None] = Future()
+        try:
+            result = self._run_compiled_dag_once(scheduler_output, grammar_output)
+        except Exception as exc:  # pragma: no cover - surface to caller
+            future.set_exception(exc)
+        else:
+            future.set_result(result)
+        return future
 
     def collective_rpc(  # type: ignore[override]
         self,
