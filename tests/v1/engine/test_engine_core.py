@@ -315,13 +315,18 @@ def test_engine_core_concurrent_batches():
 
     # Schedule Batch 1: (10, req0)
     assert engine_core.step_with_batch_queue()[0] is None
+    assert len(engine_core.batch_queue) == 1
+    scheduler_output = engine_core.batch_queue[-1][1]
+    assert scheduler_output.num_scheduled_tokens["0"] == 10
     # num_computed_tokens should have been updated immediately.
     assert engine_core.scheduler.requests[req0.request_id].num_computed_tokens == 10
 
     # Schedule Batch 2: (2, req0), (8, req1)
-    # With the thread-safe queue and blocking semantics, scheduling steps
-    # return no outputs while the pipeline is being filled.
-    assert engine_core.step_with_batch_queue()[0] is None
+    assert engine_core.step_with_batch_queue()[0] == {}
+    assert len(engine_core.batch_queue) == 1
+    scheduler_output = engine_core.batch_queue[-1][1]
+    assert scheduler_output.num_scheduled_tokens["0"] == 2
+    assert scheduler_output.num_scheduled_tokens["1"] == 8
     # num_computed_tokens should have been updated immediately.
     assert engine_core.scheduler.requests["0"].num_computed_tokens == 12
     assert engine_core.scheduler.requests["1"].num_computed_tokens == 8
@@ -329,21 +334,29 @@ def test_engine_core_concurrent_batches():
     assert engine_core.scheduler.get_num_unfinished_requests() == 2
 
     # Finish Batch 1 and schedule Batch 3: (4, req1).
-    # Note that req0 cannot be scheduled because it is
-    # in the decoding stage now.
+    # Note that req0 cannot be scheduled
+    # because it is in the decoding stage now.
     engine_core.step_with_batch_queue()
+    assert len(engine_core.batch_queue) == 1
+    scheduler_output = engine_core.batch_queue[-1][1]
+    assert scheduler_output.num_scheduled_tokens["1"] == 4
 
-    # Finish Batch 2. Get first token of req0. Schedule Batch 4: (1, req0).
+    # Finish Batch 2. Get first token of req0.
+    # Schedule Batch 4: (1, req0).
     output = engine_core.step_with_batch_queue()[0].get(0)
     assert output is not None
     assert len(output.outputs) == 1
     assert engine_core.scheduler.requests[req0.request_id].num_tokens == 13
+    scheduler_output = engine_core.batch_queue[-1][1]
+    assert scheduler_output.num_scheduled_tokens["0"] == 1
 
     # Finish Batch 3. Get first token of req1. Schedule Batch 5: (1, req1).
     output = engine_core.step_with_batch_queue()[0].get(0)
     assert output is not None
     assert len(output.outputs) == 1
     assert engine_core.scheduler.requests[req1.request_id].num_tokens == 13
+    scheduler_output = engine_core.batch_queue[-1][1]
+    assert scheduler_output.num_scheduled_tokens["1"] == 1
 
     # Loop until req0 is finished.
     req_id = 0
