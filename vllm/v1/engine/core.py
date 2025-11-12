@@ -179,12 +179,10 @@ class EngineCore:
             queue.Queue[tuple[Future[ModelRunnerOutput | None], SchedulerOutput]]
             | None
         ) = None
-        self._batch_queue_futures: deque[Future[ModelRunnerOutput | None]] | None = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d", self.batch_queue_size)
             # Bounded capacity provides natural back-pressure.
             self.batch_queue = queue.Queue(maxsize=self.batch_queue_size)
-            self._batch_queue_futures = deque(maxlen=self.batch_queue_size)
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
         if (
@@ -369,8 +367,7 @@ class EngineCore:
         3. Update the scheduler from the output.
         """
         batch_queue = self.batch_queue
-        batch_queue_futures = self._batch_queue_futures
-        assert batch_queue is not None and batch_queue_futures is not None
+        assert batch_queue is not None
 
         # Try to schedule a new batch if the batch queue is not full. The
         # scheduler may return an empty batch if all requests are scheduled.
@@ -425,20 +422,10 @@ class EngineCore:
                     # No sampling required (e.g. all requests finished).
                     future = cast(Future[ModelRunnerOutput], exec_future)
                 # Add this step's future to the queue (blocks if full, but
-                # we already checked !full above) and track ordering so we can
-                # examine the oldest pending future's readiness.
+                # we already checked !full above).
                 batch_queue.put((future, scheduler_output), block=True)
-                batch_queue_futures.appendleft(future)
-
-                oldest_future_done = batch_queue_futures[-1].done()
-                if (
-                    model_executed
-                    and not batch_queue.full()
-                    and not oldest_future_done
-                ):
-                    # Queue still has capacity and the oldest batch is still
-                    # running; prioritize filling the pipeline.
-                    return None, True
+                # Prioritize filling the pipeline when possible.
+                return None, True
 
         elif batch_queue.empty():
             # Queue is empty. We should not reach here since this method should
@@ -448,8 +435,6 @@ class EngineCore:
         with record_function_or_nullcontext("core step_with_batch_queue: model_output"):
             # Block until the next result is available.
             future, scheduler_output = batch_queue.get(block=True)
-            oldest_future = batch_queue_futures.pop()
-            assert future is oldest_future
             with self.log_error_detail(scheduler_output):
                 model_output = future.result()
         with record_function_or_nullcontext(
@@ -475,7 +460,6 @@ class EngineCore:
                     grammar_output, non_block=True
                 )
                 batch_queue.put((future, deferred_scheduler_output), block=True)
-                batch_queue_futures.appendleft(future)
 
         return engine_core_outputs, model_executed
 
