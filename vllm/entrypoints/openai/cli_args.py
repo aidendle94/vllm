@@ -176,7 +176,7 @@ class FrontendArgs:
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
     enable_tokenizer_info_endpoint: bool = False
-    """Enable the /get_tokenizer_info endpoint. May expose chat
+    """Enable the `/tokenizer_info` endpoint. May expose chat
     templates and other tokenizer configuration."""
     enable_log_outputs: bool = False
     """If True, log model outputs (generations).
@@ -189,6 +189,11 @@ class FrontendArgs:
     Helps mitigate header abuse. Default: 256."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
+    tokens_only: bool = False
+    """
+    If set to True, only enable the Tokens In<>Out endpoint. 
+    This is intended for use in a Disaggregated Everything setup.
+    """
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
