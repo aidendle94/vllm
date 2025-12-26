@@ -39,7 +39,6 @@ def server(request: pytest.FixtureRequest):
         "2",
         *passed_params,
     ]
-
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 

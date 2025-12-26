@@ -6,7 +6,6 @@ from typing import Optional, cast
 
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import IterationStats
 
 
@@ -18,7 +17,6 @@ class ParentRequest:
     """
 
     request_id: str
-    external_req_id: str
     sampling_params: SamplingParams
 
     # To track the completion of child requests
@@ -33,11 +31,8 @@ class ParentRequest:
     # To efficiently obtain child sampling params
     cached_child_sampling_params: SamplingParams | None
 
-    def __init__(self, request: EngineCoreRequest) -> None:
-        assert request.external_req_id is not None
-        sampling_params = request.params
-        self.request_id = request.request_id
-        self.external_req_id = request.external_req_id
+    def __init__(self, request_id: str, sampling_params: SamplingParams) -> None:
+        self.request_id = request_id
         self.sampling_params = sampling_params
 
         self.child_requests = set()
@@ -101,7 +96,7 @@ class ParentRequest:
         self,
         child_request_id: str,
         completion_output: CompletionOutput,
-    ) -> tuple[list[CompletionOutput], bool]:
+    ) -> tuple[str, list[CompletionOutput], bool]:
         already_finished_and_returned: bool = False
         if completion_output.finished():
             if child_request_id in self.child_requests:
@@ -123,7 +118,7 @@ class ParentRequest:
             outputs = [] if self.child_requests else self.output_aggregator
 
         finished = not self.child_requests
-        return outputs, finished
+        return self.request_id, outputs, finished
 
     def observe_num_generation_tokens(self, num_generation_tokens: int):
         self.max_num_generation_tokens = max(

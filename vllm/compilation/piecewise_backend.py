@@ -53,7 +53,12 @@ class PiecewiseBackend:
         self.is_last_graph = piecewise_compile_index == total_piecewise_compiles - 1
 
         self.is_full_graph = total_piecewise_compiles == 1
-        self.is_encoder_compilation = vllm_backend.is_encoder
+        # TODO: we need to generalize encoder compilation to other models
+        self.is_encoder_compilation = vllm_backend.prefix in [
+            "Qwen2_5_VisionPatchEmbed",
+            "Qwen2_5_VisionPatchMerger",
+            "Qwen2_5_VisionBlock",
+        ]
 
         self.compile_ranges = self.compilation_config.get_compile_ranges()
         if self.is_encoder_compilation:
@@ -170,7 +175,8 @@ class PiecewiseBackend:
         range_entry = self._find_range_for_shape(runtime_shape)
 
         assert range_entry is not None, (
-            f"Shape: {runtime_shape} out of considered ranges: {self.compile_ranges}"
+            f"Shape out of considered range: {runtime_shape} "
+            "[1, max_num_batched_tokens]"
         )
 
         self._maybe_compile_for_range_entry(range_entry, args)

@@ -80,20 +80,17 @@ class AttentionSpec(KVCacheSpec):
 
 @dataclass(frozen=True)
 class FullAttentionSpec(AttentionSpec):
+    sliding_window: int | None = None
+    attention_chunk_size: int | None = None
     """
-    When hybrid allocator is disabled and the model contains both full
-    attention layers and sliding window attention layers, sliding
-    window attention are regarded as full attention in KV cache manager
-    (blocks are allocated for all tokens), while computed as sliding window
+    When hybrid allocator is disabled and the model contains both full 
+    attention layers and sliding window attention layers, sliding 
+    window attention are regarded as full attention in KV cache manager 
+    (blocks are allocated for all tokens), while computed as sliding window 
     attention in model runner.
     In this case, we use FullAttentionSpec and record the sliding window size.
-    """
-
-    sliding_window: int | None = None
-    """
     Default to None for not using sliding window attention.
     """
-    attention_chunk_size: int | None = None
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
@@ -393,11 +390,10 @@ class KVCacheConfig:
     The KV cache configuration of a model.
     """
 
-    num_blocks: int
     """The number of KV cache blocks"""
-    kv_cache_tensors: list[KVCacheTensor]
+    num_blocks: int
     """How should model runner initialize the KV cache tensors for each layer"""
-    kv_cache_groups: list[KVCacheGroupSpec]
+    kv_cache_tensors: list[KVCacheTensor]
     """
     The kv cache groups of the model.
     For models with only one type of attention, there is only one group that
@@ -405,3 +401,4 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
+    kv_cache_groups: list[KVCacheGroupSpec]

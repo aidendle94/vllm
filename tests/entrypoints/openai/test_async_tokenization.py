@@ -15,7 +15,7 @@ MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 
 
 @pytest.fixture(scope="module")
-def server():
+def server():  # noqa: F811
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",

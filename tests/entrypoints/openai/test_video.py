@@ -7,8 +7,7 @@ import openai
 import pytest
 import pytest_asyncio
 
-from vllm.multimodal.utils import encode_video_url, fetch_video
-from vllm.platforms import current_platform
+from vllm.multimodal.utils import encode_video_base64, fetch_video
 
 from ...utils import RemoteOpenAIServer
 
@@ -38,16 +37,7 @@ def server():
         json.dumps({"video": MAXIMUM_VIDEOS}),
     ]
 
-    # ROCm: Increase timeouts to handle potential network delays and slower
-    # video processing when downloading multiple videos from external sources
-    env_overrides = {}
-    if current_platform.is_rocm():
-        env_overrides = {
-            "VLLM_VIDEO_FETCH_TIMEOUT": "120",
-            "VLLM_ENGINE_ITERATION_TIMEOUT_S": "300",
-        }
-
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -58,9 +48,9 @@ async def client(server):
 
 
 @pytest.fixture(scope="session")
-def url_encoded_video() -> dict[str, str]:
+def base64_encoded_video() -> dict[str, str]:
     return {
-        video_url: encode_video_url(fetch_video(video_url)[0])
+        video_url: encode_video_base64(fetch_video(video_url)[0])
         for video_url in TEST_VIDEO_URLS
     }
 
@@ -185,9 +175,11 @@ async def test_single_chat_session_video_base64encoded(
     client: openai.AsyncOpenAI,
     model_name: str,
     video_url: str,
-    url_encoded_video: dict[str, str],
+    base64_encoded_video: dict[str, str],
 ):
-    messages = dummy_messages_from_video_url(url_encoded_video[video_url])
+    messages = dummy_messages_from_video_url(
+        f"data:video/jpeg;base64,{base64_encoded_video[video_url]}"
+    )
 
     # test single completion
     chat_completion = await client.chat.completions.create(
@@ -231,9 +223,11 @@ async def test_single_chat_session_video_base64encoded_beamsearch(
     client: openai.AsyncOpenAI,
     model_name: str,
     video_url: str,
-    url_encoded_video: dict[str, str],
+    base64_encoded_video: dict[str, str],
 ):
-    messages = dummy_messages_from_video_url(url_encoded_video[video_url])
+    messages = dummy_messages_from_video_url(
+        f"data:video/jpeg;base64,{base64_encoded_video[video_url]}"
+    )
 
     chat_completion = await client.chat.completions.create(
         model=model_name,
@@ -296,11 +290,6 @@ async def test_chat_streaming_video(
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "video_urls", [TEST_VIDEO_URLS[:i] for i in range(2, len(TEST_VIDEO_URLS))]
-)
-@pytest.mark.flaky(
-    reruns=2,
-    reruns_delay=5,
-    condition=current_platform.is_rocm(),
 )
 async def test_multi_video_input(
     client: openai.AsyncOpenAI, model_name: str, video_urls: list[str]

@@ -49,11 +49,7 @@ check_cpus() {
     echo "Need at least 1 NUMA to run benchmarking."
     exit 1
   fi
-  if [[ "$(uname -m)" == "aarch64" ]] || [[ "$(uname -m)" == "arm64" ]]; then
-    declare -g gpu_type="arm64-cpu"
-  else
-    declare -g gpu_type="cpu"
-  fi
+  declare -g gpu_type="cpu"
   echo "GPU type is $gpu_type"
 }
 
@@ -211,8 +207,8 @@ run_latency_tests() {
 
     # check if there is enough GPU to run the test
     tp=$(echo "$latency_params" | jq -r '.tensor_parallel_size')
-    if [[ "$ON_CPU" == "1" ]]; then
-      pp=$(echo "$latency_params" | jq -r '.pipeline_parallel_size // 1')
+    if [ "$ON_CPU" == "1" ]; then
+      pp=$(echo "$latency_params" | jq -r '.pipeline_parallel_size')
       world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
@@ -280,8 +276,8 @@ run_throughput_tests() {
 
     # check if there is enough GPU to run the test
     tp=$(echo "$throughput_params" | jq -r '.tensor_parallel_size')
-    if [[ "$ON_CPU" == "1" ]]; then
-      pp=$(echo "$throughput_params" | jq -r '.pipeline_parallel_size // 1')
+    if [ "$ON_CPU" == "1" ]; then
+      pp=$(echo "$throughput_params" | jq -r '.pipeline_parallel_size')
       world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
@@ -397,8 +393,8 @@ run_serving_tests() {
 
     # check if there is enough resources to run the test
     tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
-    if [[ "$ON_CPU" == "1" ]]; then
-      pp=$(echo "$server_params" | jq -r '.pipeline_parallel_size // 1')
+    if [ "$ON_CPU" == "1" ]; then
+      pp=$(echo "$server_params" | jq -r '.pipeline_parallel_size')
       world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
@@ -500,9 +496,9 @@ run_serving_tests() {
 main() {
   local ARCH
   ARCH=''
-  if [[ "$ON_CPU" == "1" ]]; then
-    check_cpus
-    ARCH="-$gpu_type"
+  if [ "$ON_CPU" == "1" ];then
+     check_cpus
+     ARCH='-cpu'
   else
      check_gpus
      ARCH="$arch_suffix"

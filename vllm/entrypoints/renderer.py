@@ -12,8 +12,9 @@ import torch
 from pydantic import Field
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.protocol import VLLMValidationError
-from vllm.inputs.data import EmbedsPrompt, TextPrompt, TokensPrompt
+from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
+from vllm.inputs.data import TextPrompt as EngineTextPrompt
+from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
@@ -96,7 +97,7 @@ class BaseRenderer(ABC):
         *,
         prompt_or_prompts: str | list[str] | list[int] | list[list[int]],
         config: RenderConfig,
-    ) -> list[TokensPrompt]:
+    ) -> list[EngineTokensPrompt]:
         """
         Convert text or token inputs into engine-ready TokensPrompt objects.
 
@@ -114,7 +115,7 @@ class BaseRenderer(ABC):
                 (e.g., tokenization and length handling).
 
         Returns:
-            list[TokensPrompt]: Engine-ready token prompts.
+            list[EngineTokensPrompt]: Engine-ready token prompts.
 
         Raises:
             ValueError: If input formats are invalid or length limits exceeded.
@@ -128,7 +129,7 @@ class BaseRenderer(ABC):
         prompt_or_prompts: str | list[str] | list[int] | list[list[int]] | None = None,
         prompt_embeds: bytes | list[bytes] | None = None,
         config: RenderConfig,
-    ) -> list[TokensPrompt | EmbedsPrompt]:
+    ) -> list[EngineTokensPrompt | EngineEmbedsPrompt]:
         """
         Convert text/token and/or base64-encoded embeddings inputs into
         engine-ready prompt objects using a unified RenderConfig.
@@ -145,7 +146,7 @@ class BaseRenderer(ABC):
                 (e.g., tokenization and length handling).
 
         Returns:
-            list[Union[TokensPrompt, EmbedsPrompt]]:
+            list[Union[EngineTokensPrompt, EngineEmbedsPrompt]]:
                 Engine-ready prompt objects.
 
         Raises:
@@ -160,35 +161,31 @@ class BaseRenderer(ABC):
         prompt_embeds: bytes | list[bytes],
         truncate_prompt_tokens: Annotated[int, Field(ge=0)] | None = None,
         cache_salt: str | None = None,
-    ) -> list[EmbedsPrompt]:
+    ) -> list[EngineEmbedsPrompt]:
         """Load and validate base64-encoded embeddings into prompt objects."""
         if not self.model_config.enable_prompt_embeds:
-            raise VLLMValidationError(
-                "You must set `--enable-prompt-embeds` to input `prompt_embeds`.",
-                parameter="prompt_embeds",
+            raise ValueError(
+                "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
             )
 
-        def _load_and_validate_embed(embed: bytes) -> EmbedsPrompt:
-            # Enable sparse tensor integrity checks to prevent out-of-bounds
-            # writes from maliciously crafted tensors
-            with torch.sparse.check_sparse_tensor_invariants():
-                tensor = torch.load(
-                    io.BytesIO(pybase64.b64decode(embed, validate=True)),
-                    weights_only=True,
-                    map_location=torch.device("cpu"),
-                )
-                assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
-                    torch.float32,
-                    torch.bfloat16,
-                    torch.float16,
-                )
-                tensor = tensor.to_dense()
+        def _load_and_validate_embed(embed: bytes) -> EngineEmbedsPrompt:
+            tensor = torch.load(
+                io.BytesIO(pybase64.b64decode(embed, validate=True)),
+                weights_only=True,
+                map_location=torch.device("cpu"),
+            )
+            assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
+                torch.float32,
+                torch.bfloat16,
+                torch.float16,
+            )
+            tensor = tensor.to_dense()
             if tensor.dim() > 2:
                 tensor = tensor.squeeze(0)
                 assert tensor.dim() == 2
             if truncate_prompt_tokens is not None:
                 tensor = tensor[-truncate_prompt_tokens:]
-            embeds_prompt = EmbedsPrompt(prompt_embeds=tensor)
+            embeds_prompt = EngineEmbedsPrompt(prompt_embeds=tensor)
             if cache_salt is not None:
                 embeds_prompt["cache_salt"] = cache_salt
             return embeds_prompt
@@ -216,7 +213,7 @@ class CompletionRenderer(BaseRenderer):
         *,
         prompt_or_prompts: str | list[str] | list[int] | list[list[int]],
         config: RenderConfig,
-    ) -> list[TokensPrompt]:
+    ) -> list[EngineTokensPrompt]:
         """Implementation of prompt rendering for completion-style requests.
 
         Uses async tokenizer pooling for improved performance. See base class
@@ -243,7 +240,7 @@ class CompletionRenderer(BaseRenderer):
         prompt_or_prompts: str | list[str] | list[int] | list[list[int]] | None = None,
         prompt_embeds: bytes | list[bytes] | None = None,
         config: RenderConfig,
-    ) -> list[TokensPrompt | EmbedsPrompt]:
+    ) -> list[EngineTokensPrompt | EngineEmbedsPrompt]:
         """
         Render text/token prompts and/or precomputed embedding prompts. At
         least one of `prompt_or_prompts` or `prompt_embeds` must be provided.
@@ -252,7 +249,7 @@ class CompletionRenderer(BaseRenderer):
         if truncate_prompt_tokens == 0:
             return []
 
-        rendered: list[TokensPrompt | EmbedsPrompt] = []
+        rendered: list[EngineTokensPrompt | EngineEmbedsPrompt] = []
 
         if prompt_embeds is not None:
             rendered.extend(
@@ -284,10 +281,10 @@ class CompletionRenderer(BaseRenderer):
 
     async def _create_prompt(
         self,
-        prompt_input: TextPrompt | TokensPrompt,
+        prompt_input: EngineTextPrompt | EngineTokensPrompt,
         config: RenderConfig,
         truncate_prompt_tokens: int | None,
-    ) -> TokensPrompt:
+    ) -> EngineTokensPrompt:
         prompt, prompt_token_ids, _ = get_prompt_components(prompt_input)
 
         if prompt_token_ids is not None:
@@ -320,7 +317,7 @@ class CompletionRenderer(BaseRenderer):
         truncate_prompt_tokens: int | None,
         add_special_tokens: bool,
         cache_salt: str | None,
-    ) -> TokensPrompt:
+    ) -> EngineTokensPrompt:
         """Tokenize text input asynchronously."""
         async_tokenizer = self._get_async_tokenizer()
 
@@ -353,7 +350,7 @@ class CompletionRenderer(BaseRenderer):
         truncate_prompt_tokens: int | None,
         cache_salt: str | None,
         needs_detokenization: bool | None = False,
-    ) -> TokensPrompt:
+    ) -> EngineTokensPrompt:
         """Optionally detokenize token IDs and build a tokens prompt."""
         token_ids = self._maybe_apply_truncation(token_ids, truncate_prompt_tokens)
 
@@ -395,18 +392,16 @@ class CompletionRenderer(BaseRenderer):
         max_length: int | None = None,
         cache_salt: str | None = None,
         prompt: str | None = None,
-    ) -> TokensPrompt:
-        """Create validated TokensPrompt."""
+    ) -> EngineTokensPrompt:
+        """Create validated EngineTokensPrompt."""
         if max_length is not None and len(token_ids) > max_length:
-            raise VLLMValidationError(
+            raise ValueError(
                 f"This model's maximum context length is {max_length} tokens. "
                 f"However, your request has {len(token_ids)} input tokens. "
-                "Please reduce the length of the input messages.",
-                parameter="input_tokens",
-                value=len(token_ids),
+                "Please reduce the length of the input messages."
             )
 
-        tokens_prompt = TokensPrompt(prompt_token_ids=token_ids)
+        tokens_prompt = EngineTokensPrompt(prompt_token_ids=token_ids)
         if cache_salt is not None:
             tokens_prompt["cache_salt"] = cache_salt
         if prompt is not None:

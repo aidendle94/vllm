@@ -7,7 +7,7 @@ vLLM also maintains a continuous performance benchmark under [perf.vllm.ai](http
 
 ## Performance benchmark quick overview
 
-**Benchmarking Coverage**: latency, throughput and fix-qps serving on B200, A100, H100, Intel® Xeon® Processors, Intel® Gaudi® 3 Accelerators and Arm® Neoverse™ with different models.
+**Benchmarking Coverage**: latency, throughput and fix-qps serving on B200, A100, H100, Intel® Xeon® Processors and Intel® Gaudi® 3 Accelerators with different models.
 
 **Benchmarking Duration**: about 1hr.
 
@@ -23,7 +23,7 @@ bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 
 Runtime environment variables:
 
-- `ON_CPU`: set the value to '1' on Intel® Xeon® and Arm® Neoverse™ Processors. Default value is 0.
+- `ON_CPU`: set the value to '1' on Intel® Xeon® Processors. Default value is 0.
 - `SERVING_JSON`: JSON file to use for the serving tests. Default value is empty string (use default file).
 - `LATENCY_JSON`: JSON file to use for the latency tests. Default value is empty string (use default file).
 - `THROUGHPUT_JSON`: JSON file to use for the throughout tests. Default value is empty string (use default file).
@@ -34,9 +34,8 @@ Runtime environment variables:
 
 See [performance-benchmarks-descriptions.md](performance-benchmarks-descriptions.md) for detailed descriptions, and use `tests/latency-tests.json`, `tests/throughput-tests.json`, `tests/serving-tests.json` to configure the test cases.
 > NOTE: For Intel® Xeon® Processors, use `tests/latency-tests-cpu.json`, `tests/throughput-tests-cpu.json`, `tests/serving-tests-cpu.json` instead.
-> For Intel® Gaudi® 3 Accelerators, use `tests/latency-tests-hpu.json`, `tests/throughput-tests-hpu.json`, `tests/serving-tests-hpu.json` instead.
-> For Arm® Neoverse™, use `tests/latency-tests-arm64-cpu.json`, `tests/throughput-tests-arm64-cpu.json`, `tests/serving-tests-arm64-cpu.json` instead.
-
+For Intel® Gaudi® 3 Accelerators, use `tests/latency-tests-hpu.json`, `tests/throughput-tests-hpu.json`, `tests/serving-tests-hpu.json` instead.
+>
 ### Latency test
 
 Here is an example of one test inside `latency-tests.json`:

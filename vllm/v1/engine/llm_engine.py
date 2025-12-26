@@ -23,7 +23,7 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
+from vllm.tokenizers import TokenizerLike, init_tokenizer_from_config
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
@@ -86,7 +86,7 @@ class LLMEngine:
         if self.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = cached_tokenizer_from_config(self.model_config)
+            tokenizer = init_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
@@ -213,10 +213,10 @@ class LLMEngine:
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
 
-    def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
+    def abort_request(self, request_ids: list[str]) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
-        request_ids = self.output_processor.abort_requests(request_ids, internal)
+        request_ids = self.output_processor.abort_requests(request_ids)
         self.engine_core.abort_requests(request_ids)
 
     def add_request(
@@ -238,12 +238,6 @@ class LLMEngine:
         # Process raw inputs into the request.
         if isinstance(prompt, EngineCoreRequest):
             request = prompt
-            if request_id != request.request_id:
-                logger.warning_once(
-                    "AsyncLLM.add_request() was passed a request_id parameter that "
-                    "does not match the EngineCoreRequest.request_id attribute. The "
-                    "latter will be used, and the former will be ignored."
-                )
         else:
             assert prompt_text is None
             request = self.input_processor.process_inputs(
@@ -261,8 +255,6 @@ class LLMEngine:
             elif isinstance(prompt, Mapping):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
-        self.input_processor.assign_request_id(request)
-
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
 
@@ -276,7 +268,7 @@ class LLMEngine:
             return
 
         # Fan out child requests (for n>1).
-        parent_req = ParentRequest(request)
+        parent_req = ParentRequest(request_id, params)
         for idx in range(n):
             request_id, child_params = parent_req.get_child_info(idx)
             child_request = request if idx == n - 1 else copy(request)

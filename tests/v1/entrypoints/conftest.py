@@ -76,8 +76,6 @@ def sample_json_schema():
         },
         "required": ["name", "age", "skills", "grade", "email", "work_history"],
         "additionalProperties": False,
-        "minProperties": 1,
-        "maxProperties": 10,
     }
 
 
@@ -98,9 +96,6 @@ def unsupported_json_schema():
         },
         "required": ["score", "tags"],
         "additionalProperties": False,
-        "patternProperties": {
-            "^score$": {"type": "integer"},
-        },
     }
 
 

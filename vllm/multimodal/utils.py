@@ -3,7 +3,6 @@
 
 import asyncio
 import atexit
-import mimetypes
 from collections.abc import Generator, Set
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
@@ -358,31 +357,17 @@ class MediaConnector:
 def encode_audio_base64(
     audio: np.ndarray,
     sampling_rate: int,
-    *,
-    format: str = "WAV",
 ) -> str:
     """Encode audio as base64."""
     audio_io = AudioMediaIO()
-    return audio_io.encode_base64((audio, sampling_rate), audio_format=format)
-
-
-def encode_audio_url(
-    audio: np.ndarray,
-    sampling_rate: int,
-    *,
-    format: str = "WAV",
-) -> str:
-    """Encode audio as a data URL."""
-    audio_b64 = encode_audio_base64(audio, sampling_rate, format=format)
-    mimetype = mimetypes.types_map.get("." + format.lower(), "audio")
-    return f"data:{mimetype};base64,{audio_b64}"
+    return audio_io.encode_base64((audio, sampling_rate))
 
 
 def encode_image_base64(
     image: Image.Image,
     *,
     image_mode: str = "RGB",
-    format: str | None = None,
+    format: str = "JPEG",
 ) -> str:
     """
     Encode a pillow image to base64 format.
@@ -393,45 +378,10 @@ def encode_image_base64(
     return image_io.encode_base64(image, image_format=format)
 
 
-def encode_image_url(
-    image: Image.Image,
-    *,
-    image_mode: str = "RGB",
-    format: str = "PNG",
-) -> str:
-    """
-    Encode a pillow image as a data URL.
-
-    By default, the image is converted into RGB format before being encoded.
-    """
-    image_b64 = encode_image_base64(image, image_mode=image_mode, format=format)
-    mimetype = mimetypes.types_map.get("." + format.lower(), "image")
-    return f"data:{mimetype};base64,{image_b64}"
-
-
-def encode_video_base64(
-    frames: npt.NDArray,
-    *,
-    format: str = "JPEG",
-) -> str:
+def encode_video_base64(frames: npt.NDArray) -> str:
     image_io = ImageMediaIO()
     video_io = VideoMediaIO(image_io)
-    return video_io.encode_base64(frames, video_format=format)
-
-
-def encode_video_url(
-    frames: npt.NDArray,
-    *,
-    format: str = "JPEG",
-) -> str:
-    video_b64 = encode_video_base64(frames, format=format)
-
-    if format.lower() == "jpeg":
-        mimetype = "video/jpeg"
-    else:
-        mimetype = mimetypes.types_map.get("." + format.lower(), "video")
-
-    return f"data:{mimetype};base64,{video_b64}"
+    return video_io.encode_base64(frames)
 
 
 def argsort_mm_positions(

@@ -15,7 +15,6 @@ from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8KVCacheMethod,
     Fp8LinearMethod,
-    Fp8MoeBackend,
     Fp8MoEMethod,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -217,7 +216,7 @@ def test_scaled_fp8_quant(dtype) -> None:
     ref_y, inv_scale = ops.scaled_fp8_quant(x, None)
     ref_y = per_tensor_dequantize(ref_y, inv_scale, dtype)
 
-    # Reference dynamic quantization
+    # Reference dynamic quantizaton
     y = quantize_ref(x, inv_scale)
     torch.testing.assert_close(ref_y, per_tensor_dequantize(y, inv_scale, dtype))
 
@@ -325,10 +324,7 @@ def test_fp8_reloading(
                 weight_loader=default_weight_loader,
             )
 
-        # Fp8LinearMethod uses use_marlin
-        # Fp8MoEMethod uses fp8_backend
         method.use_marlin = use_marlin
-        method.fp8_backend = Fp8MoeBackend.MARLIN if use_marlin else None
 
     # capture weights format during loading
     original_metadata = [

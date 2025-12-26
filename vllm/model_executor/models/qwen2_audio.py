@@ -101,7 +101,7 @@ class Qwen2AudioEmbeddingInputs(TensorSchema):
 
     audio_embeds: Annotated[
         list[torch.Tensor],
-        TensorShape("bn", "naf", "hs", dynamic_dims={"naf"}),
+        TensorShape("bn", "naf", "hs"),
     ]
 
 

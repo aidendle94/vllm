@@ -8,8 +8,10 @@
   #include <sys/sysctl.h>
 #endif
 
-#include "cpu/cpu_arch_macros.h"
-#include "cpu/utils.hpp"
+#include "cpu_types.hpp"
+#include "scratchpad_manager.h"
+#include "cpu_attn_macros.h"
+#include "utils.hpp"
 
 namespace cpu_attention {
 enum class ISA { AMX, VEC, VEC16, NEON };
@@ -376,13 +378,12 @@ class AttentionScheduler {
 
   static constexpr int32_t MaxQTileIterNum = 128;
 
-  AttentionScheduler()
-      : available_cache_size_(cpu_utils::get_available_l2_size()) {}
+  AttentionScheduler() : available_cache_size_(get_available_l2_size()) {}
 
   torch::Tensor schedule(const ScheduleInput& input) const {
     const bool casual = input.casual;
     const int32_t thread_num = omp_get_max_threads();
-    const int64_t cache_size = cpu_utils::get_available_l2_size();
+    const int64_t cache_size = get_available_l2_size();
     const int32_t max_num_q_per_iter = input.max_num_q_per_iter;
     const int32_t kv_len_alignment = input.kv_block_alignment;
     int32_t q_head_per_kv = input.num_heads_q / input.num_heads_kv;
@@ -658,7 +659,7 @@ class AttentionScheduler {
             metadata_ptr->thread_num +
         metadata_ptr->reduction_scratchpad_size_per_kv_head *
             (use_gqa ? input.num_heads_kv : input.num_heads_q);
-    cpu_utils::ScratchPadManager::get_scratchpad_manager()->realloc(
+    DNNLScratchPadManager::get_dnnl_scratchpad_manager()->realloc(
         scratchpad_size);
 
     // metadata_ptr->print();
@@ -666,7 +667,7 @@ class AttentionScheduler {
     // test out of boundary access
     // {
     //     float* cache_ptr =
-    //     cpu_utils::ScratchPadManager::getl_scratchpad_manager()->get_data<float>();
+    //     DNNLScratchPadManager::get_dnnl_scratchpad_manager()->get_data<float>();
     //     for (int64_t i = 0; i < scratchpad_size / sizeof(float); ++i) {
     //         cache_ptr[i] = std::numeric_limits<float>::quiet_NaN();
     //     }
@@ -746,6 +747,27 @@ class AttentionScheduler {
     }
     int64_t rounded_tile_size = (tile_size / round_size) * round_size;
     return std::max(rounded_tile_size, round_size);
+  }
+
+  static int64_t get_available_l2_size() {
+    static int64_t size = []() {
+#if defined(__APPLE__)
+      // macOS doesn't have _SC_LEVEL2_CACHE_SIZE. Use sysctlbyname.
+      int64_t l2_cache_size = 0;
+      size_t len = sizeof(l2_cache_size);
+      if (sysctlbyname("hw.l2cachesize", &l2_cache_size, &len, NULL, 0) == 0 &&
+          l2_cache_size > 0) {
+        return l2_cache_size >> 1;  // use 50% of L2 cache
+      }
+      // Fallback if sysctlbyname fails
+      return 128LL * 1024 >> 1;  // use 50% of 128KB
+#else
+      long l2_cache_size = sysconf(_SC_LEVEL2_CACHE_SIZE);
+      TORCH_CHECK_NE(l2_cache_size, -1);
+      return l2_cache_size >> 1;  // use 50% of L2 cache
+#endif
+    }();
+    return size;
   }
 
  private:
@@ -1380,7 +1402,7 @@ class AttentionMainLoop {
 
       // init buffers
       void* scratchpad_ptr =
-          cpu_utils::ScratchPadManager::get_scratchpad_manager()
+          DNNLScratchPadManager::get_dnnl_scratchpad_manager()
               ->get_data<void>();
       AttentionScratchPad buffer_manager(thread_id, metadata, scratchpad_ptr);
 
@@ -1400,7 +1422,8 @@ class AttentionMainLoop {
         }
       }
 
-      const int64_t available_cache_size = cpu_utils::get_available_l2_size();
+      const int64_t available_cache_size =
+          AttentionScheduler::get_available_l2_size();
       const int32_t default_tile_size =
           AttentionScheduler::calcu_default_tile_size(
               available_cache_size, head_dim, sizeof(kv_cache_t),

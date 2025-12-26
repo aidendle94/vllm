@@ -22,8 +22,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs, batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
-from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
-from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers import (
+    MistralTokenizer,
+    TokenizerLike,
+    cached_tokenizer_from_config,
+)
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import (

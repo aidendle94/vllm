@@ -7,7 +7,9 @@ Define KV connector functionality mixin for model runners.
 import copy
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import TYPE_CHECKING
+from typing import (
+    TYPE_CHECKING,  # noqa: UP035
+)
 
 import torch
 

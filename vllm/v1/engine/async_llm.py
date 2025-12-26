@@ -4,7 +4,6 @@ import asyncio
 import os
 import socket
 import time
-import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, cast
@@ -27,7 +26,7 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
+from vllm.tokenizers import TokenizerLike, init_tokenizer_from_config
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
@@ -112,7 +111,7 @@ class AsyncLLM(EngineClient):
         if self.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = cached_tokenizer_from_config(self.model_config)
+            tokenizer = init_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
@@ -290,15 +289,12 @@ class AsyncLLM(EngineClient):
 
         is_pooling = isinstance(params, PoolingParams)
 
+        # Create a new output collector for the request.
+        queue = RequestOutputCollector(output_kind=params.output_kind)
+
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
             request = prompt
-            if request_id != request.request_id:
-                logger.warning_once(
-                    "AsyncLLM.add_request() was passed a request_id parameter that "
-                    "does not match the EngineCoreRequest.request_id attribute. The "
-                    "latter will be used, and the former will be ignored."
-                )
         else:
             assert prompt_text is None
             request = self.input_processor.process_inputs(
@@ -317,11 +313,6 @@ class AsyncLLM(EngineClient):
             elif isinstance(prompt, Mapping):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
-        self.input_processor.assign_request_id(request)
-
-        # Create a new output collector for the request.
-        queue = RequestOutputCollector(params.output_kind, request.request_id)
-
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
 
@@ -333,7 +324,7 @@ class AsyncLLM(EngineClient):
         assert isinstance(parent_params, SamplingParams)
 
         # Fan out child requests (for n>1).
-        parent_request = ParentRequest(request)
+        parent_request = ParentRequest(request_id, parent_params)
         for idx in range(parent_params.n):
             request_id, child_params = parent_request.get_child_info(idx)
             child_request = request if idx == parent_params.n - 1 else copy(request)
@@ -404,7 +395,6 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
-        q: RequestOutputCollector | None = None
         try:
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
@@ -455,8 +445,7 @@ class AsyncLLM(EngineClient):
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
         except (asyncio.CancelledError, GeneratorExit):
-            if q is not None:
-                await self.abort(q.request_id, internal=True)
+            await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -475,8 +464,7 @@ class AsyncLLM(EngineClient):
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
-            if q is not None:
-                await self.abort(q.request_id, internal=True)
+            await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
@@ -552,15 +540,13 @@ class AsyncLLM(EngineClient):
 
         self.output_handler = asyncio.create_task(output_handler())
 
-    async def abort(
-        self, request_id: str | Iterable[str], internal: bool = False
-    ) -> None:
+    async def abort(self, request_id: str | Iterable[str]) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
+        all_request_ids = self.output_processor.abort_requests(request_ids)
         await self.engine_core.abort_requests_async(all_request_ids)
 
         if self.log_requests:
@@ -594,7 +580,7 @@ class AsyncLLM(EngineClient):
         if not wait_for_inflight_requests:
             request_ids = list(self.output_processor.request_states.keys())
             if request_ids:
-                await self.abort(request_ids, internal=True)
+                await self.abort(request_ids)
 
         # Wait for running requests to drain before clearing cache.
         if self.output_processor.has_unfinished_requests():
@@ -641,12 +627,8 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
-
-        NOTE: truncate_prompt_tokens is deprecated in v0.14.
-        TODO: Remove truncate_prompt_tokens in v0.15.
         """
 
-        q: RequestOutputCollector | None = None
         try:
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
@@ -659,19 +641,9 @@ class AsyncLLM(EngineClient):
 
             if tokenization_kwargs is None:
                 tokenization_kwargs = {}
-
-            if truncate_prompt_tokens is not None:
-                warnings.warn(
-                    "The `truncate_prompt_tokens` parameter in `AsyncLLM.encode()` "
-                    "is deprecated and will be removed in v0.15. "
-                    "Please use `pooling_params.truncate_prompt_tokens` instead.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-
             _validate_truncation_size(
                 self.model_config.max_model_len,
-                pooling_params.truncate_prompt_tokens,
+                truncate_prompt_tokens,
                 tokenization_kwargs,
             )
 
@@ -701,8 +673,7 @@ class AsyncLLM(EngineClient):
         # If the request is disconnected by the client, generate()
         # is cancelled. So, we abort the request if we end up here.
         except asyncio.CancelledError:
-            if q is not None:
-                await self.abort(q.request_id, internal=True)
+            await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -721,8 +692,7 @@ class AsyncLLM(EngineClient):
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
-            if q is not None:
-                await self.abort(q.request_id, internal=True)
+            await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 
+import torch
+
 from vllm.v1.request import Request, RequestStatus
 
 
@@ -37,8 +39,14 @@ def remove_all(lst: list, items_to_remove: set) -> list:
     return [item for item in lst if item not in items_to_remove]
 
 
-def check_stop(request: Request, max_model_len: int) -> bool:
-    assert not request.pooling_params
+def check_stop(
+    request: Request, max_model_len: int, pooler_output: torch.Tensor | None = None
+) -> bool:
+    if request.pooling_params:
+        if pooler_output is not None:
+            request.status = RequestStatus.FINISHED_STOPPED
+            return True
+        return False
 
     sampling_params = request.sampling_params
     assert sampling_params is not None

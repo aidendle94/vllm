@@ -20,21 +20,23 @@ from ..utils import compare_two_settings, create_new_process_for_each_test
 )
 @create_new_process_for_each_test()
 def test_pp_cudagraph(
+    monkeypatch: pytest.MonkeyPatch,
     PP_SIZE: int,
     MODEL_NAME: str,
     ATTN_BACKEND: LiteralString,
 ):
-    cudagraph_args = [
-        # use half precision for speed and memory savings in CI environment
-        "--dtype",
-        "float16",
-        "--pipeline-parallel-size",
-        str(PP_SIZE),
-        "--distributed-executor-backend",
-        "mp",
-        f"--attention-backend={ATTN_BACKEND}",
-    ]
+    with monkeypatch.context() as m:
+        cudagraph_args = [
+            # use half precision for speed and memory savings in CI environment
+            "--dtype",
+            "float16",
+            "--pipeline-parallel-size",
+            str(PP_SIZE),
+            "--distributed-executor-backend",
+            "mp",
+        ]
+        m.setenv("VLLM_ATTENTION_BACKEND", ATTN_BACKEND)
 
-    eager_args = cudagraph_args + ["--enforce-eager"]
+        eager_args = cudagraph_args + ["--enforce-eager"]
 
-    compare_two_settings(MODEL_NAME, eager_args, cudagraph_args)
+        compare_two_settings(MODEL_NAME, eager_args, cudagraph_args)

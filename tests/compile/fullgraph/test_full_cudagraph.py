@@ -74,6 +74,7 @@ def llm_pair(request):
         # Force native sampler to avoid potential nondeterminism in FlashInfer
         # when per-request generators are not used in V1.
         "VLLM_USE_FLASHINFER_SAMPLER": "0",
+        **backend_config.env_vars,
     }
     with temporary_environ(env_vars):
         full = LLM(
@@ -169,10 +170,16 @@ class TestFullCUDAGraph:
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
 def test_full_cudagraph_with_invalid_backend():
-    # Flex_Attention is not supported with full cuda graph
-    with pytest.raises(RuntimeError):
+    with (
+        temporary_environ(
+            {
+                "VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION",
+                # Flex_Attention is not supported with full cuda graph
+            }
+        ),
+        pytest.raises(RuntimeError),
+    ):
         LLM(
             model="Qwen/Qwen2-1.5B-Instruct",
             compilation_config=CompilationConfig(cudagraph_mode="FULL"),
-            attention_config={"backend": "FLEX_ATTENTION"},
         )

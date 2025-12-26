@@ -141,7 +141,6 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            prefix=maybe_prefix(prefix, "embed_tokens"),
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 

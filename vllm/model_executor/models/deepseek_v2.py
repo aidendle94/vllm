@@ -835,11 +835,7 @@ class Indexer(nn.Module):
         )
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
         self.weights_proj = ReplicatedLinear(
-            hidden_size,
-            self.n_head,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.weights_proj",
+            hidden_size, self.n_head, quant_config=None, prefix=f"{prefix}.weights_proj"
         )
         self.softmax_scale = self.head_dim**-0.5
 
@@ -878,14 +874,8 @@ class Indexer(nn.Module):
         )
 
         q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
-        # Note: RoPE (NeoX) can introduce extra leading dimensions during compilation
-        # so we need to reshape back to token-flattened shapes
-        q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
-        k_pe = k_pe.reshape(-1, 1, self.rope_dim)
-
-        q = torch.cat([q_pe, q_nope], dim=-1)
-        # `k_pe` is [num_tokens, 1, rope_dim] (MQA).
-        k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+        q = torch.cat([q_pe.squeeze(0), q_nope], dim=-1)
+        k = torch.cat([k_pe.squeeze((0, 2)), k_nope], dim=-1)
 
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
@@ -1598,11 +1588,7 @@ class DeepseekV2ForCausalLM(
                     # Determine split axis based on op type
                     # gate/up: ColumnParallel → split along dim 0
                     # down: RowParallel → split along dim 1
-                    split_dim = (
-                        1
-                        if ("down_proj.weight" in name and loaded_weight.ndim > 1)
-                        else 0
-                    )
+                    split_dim = 1 if "down_proj.weight" in name else 0
                     total = loaded_weight.shape[split_dim]
                     assert total % num_chunks == 0, (
                         f"Shared expert weight dim {total} "
@@ -1615,13 +1601,14 @@ class DeepseekV2ForCausalLM(
                     weight_to_load = loaded_weight
 
                     if is_fusion_moe_shared_experts_layer:
-                        chunk_slice = slice(j * chunk_size, (j + 1) * chunk_size)
-                        if loaded_weight.ndim == 1:
-                            weight_to_load = loaded_weight[chunk_slice]
-                        elif split_dim == 0:
-                            weight_to_load = loaded_weight[chunk_slice, :]
+                        if split_dim == 0:
+                            weight_to_load = loaded_weight[
+                                j * chunk_size : (j + 1) * chunk_size, :
+                            ]
                         else:
-                            weight_to_load = loaded_weight[:, chunk_slice]
+                            weight_to_load = loaded_weight[
+                                :, j * chunk_size : (j + 1) * chunk_size
+                            ]
                         # Synthesize an expert-style name so expert mapping
                         # can route it
                         chunk_name = name.replace(

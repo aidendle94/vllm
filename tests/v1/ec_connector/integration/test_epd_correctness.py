@@ -31,7 +31,7 @@ import openai
 import requests
 
 from vllm.assets.image import ImageAsset
-from vllm.multimodal.utils import encode_image_url
+from vllm.multimodal.utils import encode_image_base64
 
 MAX_OUTPUT_LEN = 256
 
@@ -49,7 +49,9 @@ SAMPLE_PROMPTS_MM: list[dict] = [
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {"url": encode_image_url(image_1)},
+                        "image_url": {
+                            "url": f"data:image;base64,{encode_image_base64(image_1)}"
+                        },
                     },
                     {"type": "text", "text": "What's in this image?"},
                 ],
@@ -64,7 +66,9 @@ SAMPLE_PROMPTS_MM: list[dict] = [
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {"url": encode_image_url(image_2)},
+                        "image_url": {
+                            "url": f"data:image;base64,{encode_image_base64(image_2)}"
+                        },
                     },
                     {
                         "type": "image_url",

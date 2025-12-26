@@ -64,7 +64,7 @@ th:not(:first-child) {
 | [CP](../configuration/optimization.md#chunked-prefill)                                     | [❌](https://github.com/vllm-project/vllm/issues/2729) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
 | [APC](automatic_prefix_caching.md)                        | [❌](https://github.com/vllm-project/vllm/issues/3687) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
 | [LoRA](lora.md)                                           | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
-| [SD](spec_decode.md)                                      | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ✅     | ✅        |
+| [SD](spec_decode.md)                                      | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ✅     | [🟠](https://github.com/vllm-project/vllm/issues/26963)       |
 | CUDA graph                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ✅     | [❌](https://github.com/vllm-project/vllm/issues/26970)        |
 | [pooling](../models/pooling_models.md)                    | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
 | <abbr title="Encoder-Decoder Models">enc-dec</abbr>       | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❌     | ✅        |

@@ -37,15 +37,12 @@ class VllmSerializableFunction(SerializableCallable):
     serializing the Dynamo fx graph plus example inputs.
     """
 
-    def __init__(
-        self, graph_module, example_inputs, prefix, optimized_call, is_encoder=False
-    ):
+    def __init__(self, graph_module, example_inputs, prefix, optimized_call):
         assert isinstance(graph_module, torch.fx.GraphModule)
         self.graph_module = graph_module
         self.example_inputs = example_inputs
         self.prefix = prefix
         self.optimized_call = optimized_call
-        self.is_encoder = is_encoder
         self.shape_env = None
         sym_input = next(
             (i for i in self.example_inputs if isinstance(i, torch.SymInt)), None
@@ -107,12 +104,8 @@ class VllmSerializableFunction(SerializableCallable):
         state = pickle.loads(data)
         fake_mode = FakeTensorMode(shape_env=ShapeEnv())
         state["graph_module"] = GraphPickler.loads(state["graph_module"], fake_mode)
-        state["graph_module"].recompile()
         state["example_inputs"] = GraphPickler.loads(state["example_inputs"], fake_mode)
-        is_encoder = state.get("is_encoder", False)
-        vllm_backend = VllmBackend(
-            get_current_vllm_config(), state["prefix"], is_encoder
-        )
+        vllm_backend = VllmBackend(get_current_vllm_config(), state["prefix"])
 
         def optimized_call(*example_inputs):
             """

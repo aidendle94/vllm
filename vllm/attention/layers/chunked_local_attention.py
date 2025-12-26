@@ -4,7 +4,7 @@ import functools
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig
@@ -51,19 +51,11 @@ def create_chunked_local_attention_backend(
             common_prefix_len: int,
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
-        ):
-            cm, make_virtual_batches_block_table = make_local_attention_virtual_batches(
+        ) -> AttentionMetadata:
+            common_attn_metadata = make_local_attention_virtual_batches(
                 attention_chunk_size, common_attn_metadata, block_size
             )
-            metadata = super().build(common_prefix_len, cm, fast_build)
-            metadata.make_virtual_batches_block_table = make_virtual_batches_block_table
-            return metadata
-
-        def update_block_table(
-            self, metadata, blk_table: torch.Tensor, slot_mapping: torch.Tensor
-        ):
-            blk_table = metadata.make_virtual_batches_block_table(blk_table)
-            return super().update_block_table(metadata, blk_table, slot_mapping)
+            return super().build(common_prefix_len, common_attn_metadata, fast_build)
 
     attn_backend = subclass_attention_backend(
         name_prefix=prefix,

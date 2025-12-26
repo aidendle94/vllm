@@ -120,7 +120,6 @@ class RerankResult(BaseModel):
 
 
 class RerankUsage(BaseModel):
-    prompt_tokens: int
     total_tokens: int
 
 

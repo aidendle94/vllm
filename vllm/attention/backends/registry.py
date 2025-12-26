@@ -77,8 +77,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     )
     CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
-    # set to None to avoid alias with other backend, whose value is an empty string
-    CUSTOM = None
+    CUSTOM = ""
 
     def get_path(self, include_classname: bool = True) -> str:
         """Get the class path for this backend (respects overrides).
@@ -140,8 +139,7 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     LINEAR = "vllm.v1.attention.backends.linear_attn.LinearAttentionBackend"
     GDN_ATTN = "vllm.v1.attention.backends.gdn_attn.GDNAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
-    # set to None to avoid alias with other backend, whose value is an empty string
-    CUSTOM = None
+    CUSTOM = ""
 
     def get_path(self, include_classname: bool = True) -> str:
         """Get the class path for this backend (respects overrides).
@@ -203,8 +201,8 @@ _MAMBA_ATTN_OVERRIDES: dict[MambaAttentionBackendEnum, str] = {}
 
 def register_backend(
     backend: AttentionBackendEnum | MambaAttentionBackendEnum,
-    class_path: str | None = None,
     is_mamba: bool = False,
+    class_path: str | None = None,
 ) -> Callable[[type], type]:
     """Register or override a backend implementation.
 

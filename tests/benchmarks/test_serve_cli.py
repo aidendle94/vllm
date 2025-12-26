@@ -19,18 +19,21 @@ def server():
 
 @pytest.mark.benchmark
 def test_bench_serve(server):
-    # Test default model detection and input/output len
     command = [
         "vllm",
         "bench",
         "serve",
+        "--model",
+        MODEL_NAME,
         "--host",
         server.host,
         "--port",
         str(server.port),
-        "--input-len",
+        "--dataset-name",
+        "random",
+        "--random-input-len",
         "32",
-        "--output-len",
+        "--random-output-len",
         "4",
         "--num-prompts",
         "5",

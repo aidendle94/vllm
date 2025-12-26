@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.serving_engine import (
     EmbeddingServeContext,
     OpenAIServing,
     ServeContext,
+    TextTokensPrompt,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.pooling.embed.protocol import (
@@ -31,7 +32,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingResponseData,
 )
 from vllm.entrypoints.renderer import RenderConfig
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import (
     EmbeddingRequestOutput,
@@ -82,7 +83,11 @@ class EmbeddingMixin(OpenAIServing):
             renderer = self._get_renderer(tokenizer)
 
             if isinstance(ctx.request, EmbeddingChatRequest):
-                _, ctx.engine_prompts = await self._preprocess_chat(
+                (
+                    _,
+                    _,
+                    ctx.engine_prompts,
+                ) = await self._preprocess_chat(
                     ctx.request,
                     tokenizer,
                     ctx.request.messages,
@@ -204,13 +209,14 @@ class EmbeddingMixin(OpenAIServing):
     async def _process_chunked_request(
         self,
         ctx: EmbeddingServeContext,
-        token_ids: list[int],
+        original_prompt: TextTokensPrompt,
         pooling_params,
         trace_headers,
         prompt_idx: int,
     ) -> list[AsyncGenerator[PoolingRequestOutput, None]]:
         """Process a single prompt using chunked processing."""
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
+        token_ids = original_prompt["prompt_token_ids"]
 
         # Split into chunks using max_position_embeddings
         max_pos_embeddings = self._get_max_position_embeddings()
@@ -222,12 +228,18 @@ class EmbeddingMixin(OpenAIServing):
             chunk_request_id = f"{ctx.request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}"
 
             # Create engine prompt for this chunk
-            chunk_engine_prompt = TokensPrompt(prompt_token_ids=chunk_tokens)
+            chunk_engine_prompt = EngineTokensPrompt(prompt_token_ids=chunk_tokens)
+
+            # Create chunk request prompt for logging
+            chunk_text = ""
+            chunk_request_prompt = TextTokensPrompt(
+                prompt=chunk_text, prompt_token_ids=chunk_tokens
+            )
 
             # Log the chunk
             self._log_inputs(
                 chunk_request_id,
-                chunk_engine_prompt,
+                chunk_request_prompt,
                 params=pooling_params,
                 lora_request=ctx.lora_request,
             )
@@ -251,7 +263,7 @@ class EmbeddingMixin(OpenAIServing):
         request,
         input_ids: list[int],
         input_text: str,
-    ) -> TokensPrompt:
+    ) -> TextTokensPrompt:
         """Override to support chunked processing for embedding requests."""
         token_num = len(input_ids)
 
@@ -316,15 +328,23 @@ class EmbeddingMixin(OpenAIServing):
                         )
                     )
 
-            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+            return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
         # For other request types, use the parent's implementation
         return super()._validate_input(request, input_ids, input_text)
 
+    def _is_text_tokens_prompt(self, prompt) -> bool:
+        """Check if a prompt is a TextTokensPrompt (has prompt_token_ids)."""
+        return (
+            isinstance(prompt, dict)
+            and "prompt_token_ids" in prompt
+            and "prompt_embeds" not in prompt
+        )
+
     async def _create_single_prompt_generator(
         self,
         ctx: EmbeddingServeContext,
-        engine_prompt: TokensPrompt,
+        engine_prompt: EngineTokensPrompt,
         pooling_params: PoolingParams,
         trace_headers: Mapping[str, str] | None,
         prompt_index: int,
@@ -393,16 +413,14 @@ class EmbeddingMixin(OpenAIServing):
 
             for i, engine_prompt in enumerate(ctx.engine_prompts):
                 # Check if this specific prompt needs chunked processing
-                if "prompt_token_ids" in engine_prompt:
-                    prompt_token_ids = engine_prompt["prompt_token_ids"]
-                    if len(prompt_token_ids) > max_pos_embeddings:
+                if self._is_text_tokens_prompt(engine_prompt):
+                    # Cast to TextTokensPrompt since we've verified
+                    # prompt_token_ids
+                    text_tokens_prompt = cast(TextTokensPrompt, engine_prompt)
+                    if len(text_tokens_prompt["prompt_token_ids"]) > max_pos_embeddings:
                         # Use chunked processing for this prompt
                         chunk_generators = await self._process_chunked_request(
-                            ctx,
-                            prompt_token_ids,
-                            pooling_params,
-                            trace_headers,
-                            i,
+                            ctx, text_tokens_prompt, pooling_params, trace_headers, i
                         )
                         generators.extend(chunk_generators)
                         continue
@@ -560,13 +578,14 @@ class EmbeddingMixin(OpenAIServing):
 
                         # Get original prompt token IDs for this prompt
                         original_prompt = ctx.engine_prompts[prompt_idx]
-                        if "prompt_token_ids" not in original_prompt:
+                        if not self._is_text_tokens_prompt(original_prompt):
                             return self.create_error_response(
-                                f"Chunked prompt {prompt_idx} does not contain "
-                                "token IDs"
+                                f"Chunked prompt {prompt_idx} is not a TextTokensPrompt"
                             )
 
-                        original_token_ids = original_prompt["prompt_token_ids"]
+                        original_token_ids = cast(TextTokensPrompt, original_prompt)[
+                            "prompt_token_ids"
+                        ]
 
                         pooling_request_output = PoolingRequestOutput(
                             request_id=aggregator["request_id"],

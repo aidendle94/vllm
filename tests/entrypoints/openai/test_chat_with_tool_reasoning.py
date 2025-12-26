@@ -12,7 +12,7 @@ MODEL_NAME = "Qwen/QwQ-32B"
 
 
 @pytest.fixture(scope="module")
-def server():
+def server():  # noqa: F811
     args = [
         "--max-model-len",
         "8192",

@@ -5,61 +5,29 @@ import json
 import sys
 import time
 import traceback
-from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
 import numpy as np
+import torch
 from fastapi import Request
-from openai.types.responses import (
-    ToolChoiceFunction,
-)
 from pydantic import ConfigDict, TypeAdapter
 from starlette.datastructures import Headers
+from typing_extensions import TypeIs
 
-import vllm.envs as envs
-from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
-from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-    ConversationMessage,
-    apply_hf_chat_template,
-    apply_mistral_chat_template,
-    parse_chat_messages_futures,
-    resolve_chat_template_content_format,
-)
 from vllm.entrypoints.context import (
-    ConversationContext,
     HarmonyContext,
     ParsableContext,
     StreamingHarmonyContext,
 )
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionNamedToolChoiceParam,
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    CompletionRequest,
-    CompletionResponse,
-    DetokenizeRequest,
-    ErrorInfo,
-    ErrorResponse,
     FunctionCall,
-    FunctionDefinition,
     ResponseInputOutputItem,
     ResponsesRequest,
-    TokenizeChatRequest,
-    TokenizeCompletionRequest,
-    TokenizeResponse,
-    TranscriptionRequest,
-    TranscriptionResponse,
-    TranslationRequest,
-    VLLMValidationError,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -81,13 +49,58 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
+from vllm.transformers_utils.tokenizer import AnyTokenizer
+
+if sys.version_info >= (3, 12):
+    from typing import TypedDict
+else:
+    from typing_extensions import TypedDict
+
+from openai.types.responses import (
+    ToolChoiceFunction,
+)
+
+import vllm.envs as envs
+from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
+from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+    ConversationMessage,
+    apply_hf_chat_template,
+    apply_mistral_chat_template,
+    parse_chat_messages_futures,
+    resolve_chat_template_content_format,
+)
+from vllm.entrypoints.context import ConversationContext
+from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    CompletionRequest,
+    CompletionResponse,
+    DetokenizeRequest,
+    ErrorInfo,
+    ErrorResponse,
+    FunctionDefinition,
+    TokenizeChatRequest,
+    TokenizeCompletionRequest,
+    TokenizeResponse,
+    TranscriptionRequest,
+    TranscriptionResponse,
+    TranslationRequest,
+)
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
 from vllm.entrypoints.responses_utils import (
     construct_input_messages,
 )
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.inputs.data import PromptType
+from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import (
     PromptComponents,
     get_prompt_components,
@@ -96,15 +109,15 @@ from vllm.inputs.parse import (
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal import (  # noqa: F401 - Required to resolve Pydantic error in RequestProcessingMixin
+    MultiModalDataDict,
+    MultiModalUUIDDict,
+)
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
-from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.tool_parsers import ToolParser, ToolParserManager
+from vllm.tokenizers import DeepseekV32Tokenizer, MistralTokenizer, TokenizerLike
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -170,6 +183,34 @@ AnyResponse: TypeAlias = (
 )
 
 
+class TextTokensPrompt(TypedDict):
+    prompt: str
+    prompt_token_ids: list[int]
+
+
+class EmbedsPrompt(TypedDict):
+    prompt_embeds: torch.Tensor
+
+
+RequestPrompt: TypeAlias = list[int] | str | TextTokensPrompt | EmbedsPrompt
+
+
+def is_text_tokens_prompt(prompt: RequestPrompt) -> TypeIs[TextTokensPrompt]:
+    return (
+        isinstance(prompt, dict)
+        and "prompt_token_ids" in prompt
+        and "prompt_embeds" not in prompt
+    )
+
+
+def is_embeds_prompt(prompt: RequestPrompt) -> TypeIs[EmbedsPrompt]:
+    return (
+        isinstance(prompt, dict)
+        and "prompt_token_ids" not in prompt
+        and "prompt_embeds" in prompt
+    )
+
+
 RequestT = TypeVar("RequestT", bound=AnyRequest)
 
 
@@ -180,7 +221,8 @@ class RequestProcessingMixin:
     handling prompt preparation and engine input.
     """
 
-    engine_prompts: list[TokensPrompt] | None = field(default_factory=list)
+    request_prompts: Sequence[RequestPrompt] | None = field(default_factory=list)
+    engine_prompts: list[EngineTokensPrompt] | None = field(default_factory=list)
 
 
 @dataclass(kw_only=True)
@@ -323,10 +365,8 @@ class OpenAIServing:
         input_processor = self.input_processor
         tokenizer = input_processor.tokenizer
         if tokenizer is None:
-            raise VLLMValidationError(
-                "You cannot use beam search when `skip_tokenizer_init=True`",
-                parameter="skip_tokenizer_init",
-                value=True,
+            raise ValueError(
+                "You cannot use beam search when `skip_tokenizer_init=True`"
             )
 
         eos_token_id: int = tokenizer.eos_token_id  # type: ignore
@@ -383,7 +423,7 @@ class OpenAIServing:
             prompts_batch, lora_req_batch = zip(
                 *[
                     (
-                        TokensPrompt(
+                        EngineTokensPrompt(
                             prompt_token_ids=beam.tokens,
                             multi_modal_data=beam.multi_modal_data,
                             mm_processor_kwargs=beam.mm_processor_kwargs,
@@ -709,7 +749,8 @@ class OpenAIServing:
             return None
 
         except Exception as e:
-            return self.create_error_response(e)
+            # TODO: Use a vllm-specific Validation Error
+            return self.create_error_response(str(e))
 
     async def _collect_batch(
         self,
@@ -740,43 +781,14 @@ class OpenAIServing:
             return None
 
         except Exception as e:
-            return self.create_error_response(e)
+            return self.create_error_response(str(e))
 
     def create_error_response(
         self,
-        message: str | Exception,
+        message: str,
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
-        param: str | None = None,
     ) -> ErrorResponse:
-        exc: Exception | None = None
-
-        if isinstance(message, Exception):
-            exc = message
-
-            from vllm.entrypoints.openai.protocol import VLLMValidationError
-
-            if isinstance(exc, VLLMValidationError):
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = exc.parameter
-            elif isinstance(exc, (ValueError, TypeError, RuntimeError)):
-                # Common validation errors from user input
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = None
-            elif exc.__class__.__name__ == "TemplateError":
-                # jinja2.TemplateError (avoid importing jinja2)
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = None
-            else:
-                err_type = "InternalServerError"
-                status_code = HTTPStatus.INTERNAL_SERVER_ERROR
-                param = None
-
-            message = str(exc)
-
         if self.log_error_stack:
             exc_type, _, _ = sys.exc_info()
             if exc_type is not None:
@@ -784,27 +796,18 @@ class OpenAIServing:
             else:
                 traceback.print_stack()
         return ErrorResponse(
-            error=ErrorInfo(
-                message=message,
-                type=err_type,
-                code=status_code.value,
-                param=param,
-            )
+            error=ErrorInfo(message=message, type=err_type, code=status_code.value)
         )
 
     def create_streaming_error_response(
         self,
-        message: str | Exception,
+        message: str,
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
-        param: str | None = None,
     ) -> str:
         json_str = json.dumps(
             self.create_error_response(
-                message=message,
-                err_type=err_type,
-                status_code=status_code,
-                param=param,
+                message=message, err_type=err_type, status_code=status_code
             ).model_dump()
         )
         return json_str
@@ -865,7 +868,6 @@ class OpenAIServing:
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND,
-            param="model",
         )
 
     def _get_active_default_mm_loras(self, request: AnyRequest) -> LoRARequest | None:
@@ -943,7 +945,7 @@ class OpenAIServing:
         prompt: str,
         tokenizer: TokenizerLike,
         add_special_tokens: bool,
-    ) -> TokensPrompt:
+    ) -> TextTokensPrompt:
         async_tokenizer = self._get_async_tokenizer(tokenizer)
 
         if (
@@ -984,7 +986,7 @@ class OpenAIServing:
         request: AnyRequest,
         prompt_ids: list[int],
         tokenizer: TokenizerLike | None,
-    ) -> TokensPrompt:
+    ) -> TextTokensPrompt:
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
 
         if truncate_prompt_tokens is None:
@@ -1007,7 +1009,7 @@ class OpenAIServing:
         request: AnyRequest,
         input_ids: list[int],
         input_text: str,
-    ) -> TokensPrompt:
+    ) -> TextTokensPrompt:
         token_num = len(input_ids)
 
         # Note: EmbeddingRequest, ClassificationRequest,
@@ -1032,15 +1034,13 @@ class OpenAIServing:
                     ClassificationChatRequest: "classification",
                 }
                 operation = operations.get(type(request), "embedding generation")
-                raise VLLMValidationError(
+                raise ValueError(
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the input for {operation}. "
-                    f"Please reduce the length of the input.",
-                    parameter="input_tokens",
-                    value=token_num,
+                    f"Please reduce the length of the input."
                 )
-            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+            return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
         # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
         # and does not require model context length validation
@@ -1048,7 +1048,7 @@ class OpenAIServing:
             request,
             (TokenizeCompletionRequest, TokenizeChatRequest, DetokenizeRequest),
         ):
-            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+            return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
         # chat completion endpoint supports max_completion_tokens
         if isinstance(request, ChatCompletionRequest):
@@ -1060,27 +1060,23 @@ class OpenAIServing:
         # Note: input length can be up to model context length - 1 for
         # completion-like requests.
         if token_num >= self.max_model_len:
-            raise VLLMValidationError(
+            raise ValueError(
                 f"This model's maximum context length is "
                 f"{self.max_model_len} tokens. However, your request has "
                 f"{token_num} input tokens. Please reduce the length of "
-                "the input messages.",
-                parameter="input_tokens",
-                value=token_num,
+                "the input messages."
             )
 
         if max_tokens is not None and token_num + max_tokens > self.max_model_len:
-            raise VLLMValidationError(
+            raise ValueError(
                 "'max_tokens' or 'max_completion_tokens' is too large: "
                 f"{max_tokens}. This model's maximum context length is "
                 f"{self.max_model_len} tokens and your request has "
                 f"{token_num} input tokens ({max_tokens} > {self.max_model_len}"
-                f" - {token_num}).",
-                parameter="max_tokens",
-                value=max_tokens,
+                f" - {token_num})."
             )
 
-        return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+        return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
     async def _tokenize_prompt_input_async(
         self,
@@ -1088,7 +1084,7 @@ class OpenAIServing:
         tokenizer: TokenizerLike,
         prompt_input: str | list[int],
         add_special_tokens: bool = True,
-    ) -> TokensPrompt:
+    ) -> TextTokensPrompt:
         """
         A simpler implementation that tokenizes a single prompt input.
         """
@@ -1107,7 +1103,7 @@ class OpenAIServing:
         tokenizer: TokenizerLike,
         prompt_inputs: Iterable[str | list[int]],
         add_special_tokens: bool = True,
-    ) -> AsyncGenerator[TokensPrompt, None]:
+    ) -> AsyncGenerator[TextTokensPrompt, None]:
         """
         A simpler implementation that tokenizes multiple prompt inputs.
         """
@@ -1160,7 +1156,11 @@ class OpenAIServing:
         chat_template_kwargs: dict[str, Any] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
         add_special_tokens: bool = False,
-    ) -> tuple[list[ConversationMessage], list[TokensPrompt]]:
+    ) -> tuple[
+        list[ConversationMessage],
+        Sequence[RequestPrompt],
+        list[EngineTokensPrompt],
+    ]:
         model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
@@ -1233,7 +1233,9 @@ class OpenAIServing:
                 "Prompt has to be a string",
                 "when the tokenizer is not initialised",
             )
-            prompt_inputs = TokensPrompt(prompt=request_prompt, prompt_token_ids=[1])
+            prompt_inputs = TextTokensPrompt(
+                prompt=request_prompt, prompt_token_ids=[1]
+            )
         elif isinstance(request_prompt, str):
             prompt_inputs = await self._tokenize_prompt_input_async(
                 request,
@@ -1246,15 +1248,14 @@ class OpenAIServing:
             assert is_list_of(request_prompt, int), (
                 "Prompt has to be either a string or a list of token ids"
             )
-            prompt_inputs = TokensPrompt(
+            prompt_inputs = TextTokensPrompt(
                 prompt=tokenizer.decode(request_prompt),
                 prompt_token_ids=request_prompt,
             )
 
-        engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["prompt_token_ids"])
-        if "prompt" in prompt_inputs:
-            engine_prompt["prompt"] = prompt_inputs["prompt"]
-
+        engine_prompt = EngineTokensPrompt(
+            prompt_token_ids=prompt_inputs["prompt_token_ids"]
+        )
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
 
@@ -1267,7 +1268,7 @@ class OpenAIServing:
         if hasattr(request, "cache_salt") and request.cache_salt is not None:
             engine_prompt["cache_salt"] = request.cache_salt
 
-        return conversation, [engine_prompt]
+        return conversation, [request_prompt], [engine_prompt]
 
     async def _process_inputs(
         self,
@@ -1278,7 +1279,6 @@ class OpenAIServing:
         lora_request: LoRARequest | None,
         trace_headers: Mapping[str, str] | None,
         priority: int,
-        data_parallel_rank: int | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for AsyncLLM."""
         tokenization_kwargs: dict[str, Any] = {}
@@ -1294,14 +1294,13 @@ class OpenAIServing:
             tokenization_kwargs=tokenization_kwargs,
             trace_headers=trace_headers,
             priority=priority,
-            data_parallel_rank=data_parallel_rank,
         )
         return engine_request, tokenization_kwargs
 
     async def _render_next_turn(
         self,
         request: ResponsesRequest,
-        tokenizer: TokenizerLike | None,
+        tokenizer: AnyTokenizer,
         messages: list[ResponseInputOutputItem],
         tool_dicts: list[dict[str, Any]] | None,
         tool_parser,
@@ -1312,7 +1311,7 @@ class OpenAIServing:
             request_input=messages,
         )
 
-        _, engine_prompts = await self._preprocess_chat(
+        _, request_prompts, engine_prompts = await self._preprocess_chat(
             request,
             tokenizer,
             new_messages,
@@ -1321,20 +1320,20 @@ class OpenAIServing:
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
         )
-        return engine_prompts
+        return request_prompts, engine_prompts
 
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
-        engine_prompt: TokensPrompt,
+        request_prompt: RequestPrompt,
+        engine_prompt: EngineTokensPrompt,
         sampling_params: SamplingParams,
         context: ConversationContext,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         **kwargs,
     ):
-        prompt_text, _, _ = self._get_prompt_components(engine_prompt)
-
+        prompt_text, _, _ = self._get_prompt_components(request_prompt)
         orig_priority = priority
         sub_request = 0
         while True:
@@ -1342,7 +1341,7 @@ class OpenAIServing:
             sub_request_id = f"{request_id}_{sub_request}"
             self._log_inputs(
                 sub_request_id,
-                engine_prompt,
+                request_prompt,
                 params=sampling_params,
                 lora_request=lora_request,
             )
@@ -1387,9 +1386,10 @@ class OpenAIServing:
             # Render the next prompt token ids.
             if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
                 prompt_token_ids = context.render_for_completion()
-                engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+                engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
+                request_prompt = prompt_token_ids
             elif isinstance(context, ParsableContext):
-                engine_prompts = await self._render_next_turn(
+                request_prompts, engine_prompts = await self._render_next_turn(
                     context.request,
                     context.tokenizer,
                     context.parser.response_messages,
@@ -1399,7 +1399,8 @@ class OpenAIServing:
                     context.chat_template_content_format,
                 )
                 engine_prompt = engine_prompts[0]
-                prompt_text, _, _ = self._get_prompt_components(engine_prompt)
+                request_prompt = request_prompts[0]
+                prompt_text, _, _ = self._get_prompt_components(request_prompt)
 
             # Update the sampling params.
             sampling_params.max_tokens = self.max_model_len - len(
@@ -1409,13 +1410,19 @@ class OpenAIServing:
             priority = orig_priority - 1
             sub_request += 1
 
-    def _get_prompt_components(self, prompt: PromptType) -> PromptComponents:
-        return get_prompt_components(prompt)
+    def _get_prompt_components(
+        self,
+        prompt: RequestPrompt | PromptType,
+    ) -> PromptComponents:
+        if isinstance(prompt, list):
+            return PromptComponents(token_ids=prompt)
+
+        return get_prompt_components(prompt)  # type: ignore[arg-type]
 
     def _log_inputs(
         self,
         request_id: str,
-        inputs: PromptType,
+        inputs: RequestPrompt | PromptType,
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:
@@ -1477,7 +1484,7 @@ class OpenAIServing:
     @staticmethod
     def _parse_tool_calls_from_content(
         request: ResponsesRequest | ChatCompletionRequest,
-        tokenizer: TokenizerLike | None,
+        tokenizer: TokenizerLike,
         enable_auto_tools: bool,
         tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
         content: str | None = None,
@@ -1517,11 +1524,6 @@ class OpenAIServing:
             and enable_auto_tools
             and (request.tool_choice == "auto" or request.tool_choice is None)
         ):
-            if tokenizer is None:
-                raise ValueError(
-                    "Tokenizer not available when `skip_tokenizer_init=True`"
-                )
-
             # Automatic Tool Call Parsing
             try:
                 tool_parser = tool_parser_cls(tokenizer)

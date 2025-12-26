@@ -131,36 +131,6 @@ class ErrorResponse(OpenAIBaseModel):
     error: ErrorInfo
 
 
-class VLLMValidationError(ValueError):
-    """vLLM-specific validation error for request validation failures.
-
-    Args:
-        message: The error message describing the validation failure.
-        parameter: Optional parameter name that failed validation.
-        value: Optional value that was rejected during validation.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        parameter: str | None = None,
-        value: Any = None,
-    ) -> None:
-        super().__init__(message)
-        self.parameter = parameter
-        self.value = value
-
-    def __str__(self):
-        base = super().__str__()
-        extras = []
-        if self.parameter is not None:
-            extras.append(f"parameter={self.parameter}")
-        if self.value is not None:
-            extras.append(f"value={self.value}")
-        return f"{base} ({', '.join(extras)})" if extras else base
-
-
 class ModelPermission(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"modelperm-{random_uuid()}")
     object: str = "model_permission"
@@ -350,7 +320,6 @@ class ResponsesRequest(OpenAIBaseModel):
     max_tool_calls: int | None = None
     metadata: Metadata | None = None
     model: str | None = None
-    logit_bias: dict[str, float] | None = None
     parallel_tool_calls: bool | None = True
     previous_response_id: str | None = None
     prompt: ResponsePrompt | None = None
@@ -364,7 +333,6 @@ class ResponsesRequest(OpenAIBaseModel):
     tools: list[Tool] = Field(default_factory=list)
     top_logprobs: int | None = 0
     top_p: float | None = None
-    top_k: int | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
 
@@ -419,7 +387,6 @@ class ResponsesRequest(OpenAIBaseModel):
     _DEFAULT_SAMPLING_PARAMS = {
         "temperature": 1.0,
         "top_p": 1.0,
-        "top_k": 0,
     }
 
     def to_sampling_params(
@@ -441,10 +408,6 @@ class ResponsesRequest(OpenAIBaseModel):
             top_p = default_sampling_params.get(
                 "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"]
             )
-        if (top_k := self.top_k) is None:
-            top_k = default_sampling_params.get(
-                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
-            )
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
@@ -465,7 +428,6 @@ class ResponsesRequest(OpenAIBaseModel):
         return SamplingParams.from_optional(
             temperature=temperature,
             top_p=top_p,
-            top_k=top_k,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop_token_ids=stop_token_ids,
@@ -473,7 +435,6 @@ class ResponsesRequest(OpenAIBaseModel):
                 RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
             ),
             structured_outputs=structured_outputs,
-            logit_bias=self.logit_bias,
         )
 
     def is_include_output_logprobs(self) -> bool:
@@ -496,9 +457,7 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     def validate_prompt(cls, data):
         if data.get("prompt") is not None:
-            raise VLLMValidationError(
-                "prompt template is not supported", parameter="prompt"
-            )
+            raise ValueError("prompt template is not supported")
         return data
 
     @model_validator(mode="before")
@@ -882,10 +841,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def validate_stream_options(cls, data):
         if data.get("stream_options") and not data.get("stream"):
-            raise VLLMValidationError(
-                "Stream options can only be defined when `stream=True`.",
-                parameter="stream_options",
-            )
+            raise ValueError("Stream options can only be defined when `stream=True`.")
 
         return data
 
@@ -894,29 +850,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
     def check_logprobs(cls, data):
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
             if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
-                raise VLLMValidationError(
-                    "`prompt_logprobs` are not available when `stream=True`.",
-                    parameter="prompt_logprobs",
+                raise ValueError(
+                    "`prompt_logprobs` are not available when `stream=True`."
                 )
 
             if prompt_logprobs < 0 and prompt_logprobs != -1:
-                raise VLLMValidationError(
-                    "`prompt_logprobs` must be a positive value or -1.",
-                    parameter="prompt_logprobs",
-                    value=prompt_logprobs,
-                )
+                raise ValueError("`prompt_logprobs` must be a positive value or -1.")
         if (top_logprobs := data.get("top_logprobs")) is not None:
             if top_logprobs < 0 and top_logprobs != -1:
-                raise VLLMValidationError(
-                    "`top_logprobs` must be a positive value or -1.",
-                    parameter="top_logprobs",
-                    value=top_logprobs,
-                )
+                raise ValueError("`top_logprobs` must be a positive value or -1.")
 
             if (top_logprobs == -1 or top_logprobs > 0) and not data.get("logprobs"):
-                raise VLLMValidationError(
-                    "when using `top_logprobs`, `logprobs` must be set to true.",
-                    parameter="top_logprobs",
+                raise ValueError(
+                    "when using `top_logprobs`, `logprobs` must be set to true."
                 )
 
         return data
@@ -1330,10 +1276,9 @@ class CompletionRequest(OpenAIBaseModel):
             for k in ("json", "regex", "choice")
         )
         if count > 1:
-            raise VLLMValidationError(
+            raise ValueError(
                 "You can only use one kind of constraints for structured "
-                "outputs ('json', 'regex' or 'choice').",
-                parameter="structured_outputs",
+                "outputs ('json', 'regex' or 'choice')."
             )
         return data
 
@@ -1342,23 +1287,14 @@ class CompletionRequest(OpenAIBaseModel):
     def check_logprobs(cls, data):
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
             if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
-                raise VLLMValidationError(
-                    "`prompt_logprobs` are not available when `stream=True`.",
-                    parameter="prompt_logprobs",
+                raise ValueError(
+                    "`prompt_logprobs` are not available when `stream=True`."
                 )
 
             if prompt_logprobs < 0 and prompt_logprobs != -1:
-                raise VLLMValidationError(
-                    "`prompt_logprobs` must be a positive value or -1.",
-                    parameter="prompt_logprobs",
-                    value=prompt_logprobs,
-                )
+                raise ValueError("`prompt_logprobs` must be a positive value or -1.")
         if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
-            raise VLLMValidationError(
-                "`logprobs` must be a positive value.",
-                parameter="logprobs",
-                value=logprobs,
-            )
+            raise ValueError("`logprobs` must be a positive value.")
 
         return data
 
@@ -1366,10 +1302,7 @@ class CompletionRequest(OpenAIBaseModel):
     @classmethod
     def validate_stream_options(cls, data):
         if data.get("stream_options") and not data.get("stream"):
-            raise VLLMValidationError(
-                "Stream options can only be defined when `stream=True`.",
-                parameter="stream_options",
-            )
+            raise ValueError("Stream options can only be defined when `stream=True`.")
 
         return data
 
@@ -1712,23 +1645,13 @@ class ResponsesResponse(OpenAIBaseModel):
     usage: ResponseUsage | None = None
     user: str | None = None
 
-    # --8<-- [start:responses-response-extra-params]
+    # --8<-- [start:responses-extra-params]
     # These are populated when enable_response_messages is set to True
     # NOTE: custom serialization is needed
     # see serialize_input_messages and serialize_output_messages
-    input_messages: ResponseInputOutputMessage | None = Field(
-        default=None,
-        description=(
-            "If enable_response_messages, we can show raw token input to model."
-        ),
-    )
-    output_messages: ResponseInputOutputMessage | None = Field(
-        default=None,
-        description=(
-            "If enable_response_messages, we can show raw token output of model."
-        ),
-    )
-    # --8<-- [end:responses-response-extra-params]
+    input_messages: ResponseInputOutputMessage | None = None
+    output_messages: ResponseInputOutputMessage | None = None
+    # --8<-- [end:responses-extra-params]
 
     # NOTE: openAI harmony doesn't serialize TextContent properly,
     # TODO: this fixes for TextContent, but need to verify for tools etc
@@ -2122,9 +2045,6 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     presence_penalty: float | None = 0.0
     """The presence penalty to use for sampling."""
-
-    max_completion_tokens: int | None = None
-    """The maximum number of tokens to generate."""
     # --8<-- [end:transcription-sampling-params]
 
     # Default sampling parameters for transcription requests.
@@ -2196,15 +2116,7 @@ class TranscriptionRequest(OpenAIBaseModel):
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)
         if any(bool(data.get(so, False)) for so in stream_opts) and not stream:
-            # Find which specific stream option was set
-            invalid_param = next(
-                (so for so in stream_opts if data.get(so, False)),
-                "stream_include_usage",
-            )
-            raise VLLMValidationError(
-                "Stream options can only be defined when `stream=True`.",
-                parameter=invalid_param,
-            )
+            raise ValueError("Stream options can only be defined when `stream=True`.")
 
         return data
 
@@ -2379,9 +2291,6 @@ class TranslationRequest(OpenAIBaseModel):
     # Flattened stream option to simplify form data.
     stream_include_usage: bool | None = False
     stream_continuous_usage_stats: bool | None = False
-
-    max_completion_tokens: int | None = None
-    """The maximum number of tokens to generate."""
     # --8<-- [end:translation-extra-params]
 
     # Default sampling parameters for translation requests.
@@ -2417,15 +2326,7 @@ class TranslationRequest(OpenAIBaseModel):
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)
         if any(bool(data.get(so, False)) for so in stream_opts) and not stream:
-            # Find which specific stream option was set
-            invalid_param = next(
-                (so for so in stream_opts if data.get(so, False)),
-                "stream_include_usage",
-            )
-            raise VLLMValidationError(
-                "Stream options can only be defined when `stream=True`.",
-                parameter=invalid_param,
-            )
+            raise ValueError("Stream options can only be defined when `stream=True`.")
 
         return data
 

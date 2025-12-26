@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: SIM117
 import fnmatch
 import glob
 import itertools
@@ -58,7 +59,7 @@ def is_moe_model(model: torch.nn.Module) -> bool:
 
 
 class BitsAndBytesModelLoader(BaseModelLoader):
-    """Model loader to load model weights with BitsAndBytes quantization."""
+    """Model loader to load model weights with BitAndBytes quantization."""
 
     possible_config_file_names = ["adapter_config.json"]
 
