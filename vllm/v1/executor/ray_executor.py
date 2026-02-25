@@ -73,6 +73,9 @@ class RayDistributedExecutor(Executor):
         "ROCR_VISIBLE_DEVICES",
     }
 
+    # These non-vLLM env vars are copied from the driver to workers
+    ADDITIONAL_ENV_VARS = {"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"}
+
     uses_ray: bool = True
     supports_pp: bool = True
 
@@ -335,7 +338,9 @@ class RayDistributedExecutor(Executor):
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
             exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
-            additional_vars=set(current_platform.additional_env_vars),
+            additional_vars=set(current_platform.additional_env_vars).union(
+                self.ADDITIONAL_ENV_VARS
+            ),
             destination="workers",
         )
 
