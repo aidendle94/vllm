@@ -106,6 +106,9 @@ class FullAttentionSpec(AttentionSpec):
     """
     attention_chunk_size: int | None = None
 
+    cache_dtype_str: str | None = None
+    """Cache dtype string, used for TurboQuant packed size calculation."""
+
     def __post_init__(self):
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
@@ -162,6 +165,7 @@ class FullAttentionSpec(AttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
+            cache_dtype_str=specs[0].cache_dtype_str,
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -179,6 +183,19 @@ class FullAttentionSpec(AttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        if self.cache_dtype_str is not None and self.cache_dtype_str.startswith(
+            "turboquant"
+        ):
+            from vllm.model_executor.layers.quantization.turboquant import (
+                packed_head_size,
+                parse_turboquant_dtype,
+            )
+            bit_width = parse_turboquant_dtype(self.cache_dtype_str)
+            # TurboQuant packs both K and V using the same scheme.
+            # For K: packed_head_size bytes; for V: packed_head_size bytes.
+            phs = packed_head_size(self.head_size, bit_width)
+            phs_v = packed_head_size(self.head_size_v, bit_width)
+            return self.block_size * self.num_kv_heads * (phs + phs_v)
         return (
             self.block_size
             * self.num_kv_heads
