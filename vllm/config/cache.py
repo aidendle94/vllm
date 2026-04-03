@@ -20,11 +20,6 @@ CacheDType = Literal[
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
-    "turboquant",
-    "turboquant_1bit",
-    "turboquant_2bit",
-    "turboquant_3bit",
-    "turboquant_4bit",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
@@ -232,16 +227,5 @@ class CacheConfig:
                 "memory footprint and boosts the performance. "
                 "Meanwhile, it may cause accuracy drop without a proper "
                 "scaling factor."
-            )
-        elif cache_dtype.startswith("turboquant"):
-            from vllm.model_executor.layers.quantization.turboquant import (
-                parse_turboquant_dtype,
-            )
-            bit_width = parse_turboquant_dtype(cache_dtype)
-            logger.info(
-                "Using TurboQuant (%d-bit) to store kv cache. "
-                "Based on: 'TurboQuant: Online Vector Quantization with "
-                "Near-optimal Distortion Rate' (Zandieh et al., 2025).",
-                bit_width,
             )
         return cache_dtype

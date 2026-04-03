@@ -268,11 +268,6 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
-        "turboquant",
-        "turboquant_1bit",
-        "turboquant_2bit",
-        "turboquant_3bit",
-        "turboquant_4bit",
     ]
 
     @staticmethod
@@ -305,14 +300,6 @@ class TritonAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        if cache_dtype_str.startswith("turboquant"):
-            from vllm.model_executor.layers.quantization.turboquant import (
-                packed_head_size,
-                parse_turboquant_dtype,
-            )
-            bit_width = parse_turboquant_dtype(cache_dtype_str)
-            effective_head_size = packed_head_size(head_size, bit_width=bit_width)
-            return (num_blocks, 2, block_size, num_kv_heads, effective_head_size)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -421,23 +408,6 @@ class TritonAttentionImpl(AttentionImpl):
         self.use_alibi_sqrt = use_alibi_sqrt
         self.supports_quant_query_input = current_platform.is_cuda()
 
-        # TurboQuant initialization
-        self.is_turboquant = kv_cache_dtype.startswith("turboquant")
-        self._tq_state: "TurboQuantState | None" = None
-        if self.is_turboquant:
-            from vllm.model_executor.layers.quantization.turboquant import (
-                TurboQuantState,
-                parse_turboquant_dtype,
-            )
-            tq_bit_width = parse_turboquant_dtype(kv_cache_dtype)
-            self._tq_state = TurboQuantState(
-                head_dim=head_size,
-                bit_width=tq_bit_width,
-                seed=42,
-                device="cuda",
-                dtype=torch.float16,
-            )
-
     def forward(
         self,
         layer: torch.nn.Module,
@@ -500,12 +470,6 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        if self.is_turboquant:
-            return self._forward_turboquant(
-                layer, query, kv_cache, output, attn_metadata,
-                num_actual_tokens, output_scale,
-            )
-
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
         if self.kv_cache_dtype.startswith("fp8"):
@@ -559,94 +523,6 @@ class TritonAttentionImpl(AttentionImpl):
             output_scale=output_scale,
             mm_prefix_range=mm_prefix_range_tensor,
         )
-
-        return output
-
-    def _forward_turboquant(
-        self,
-        layer: torch.nn.Module,
-        query: torch.Tensor,
-        kv_cache: torch.Tensor,
-        output: torch.Tensor,
-        attn_metadata: TritonAttentionMetadata,
-        num_actual_tokens: int,
-        output_scale: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Forward pass using TurboQuant-compressed KV cache.
-
-        Strategy:
-        1. Dequantize compressed cache → temp fp16 cache (in rotated space)
-        2. Rotate Q into the same rotated space
-        3. Run standard unified_attention on rotated Q + rotated K/V
-        4. Inverse-rotate the output back to original space
-        """
-        assert self._tq_state is not None
-        tq = self._tq_state
-
-        # -- Step 1: Dequantize compressed cache to temp paged buffer --
-        # Allocate (or reuse) temporary full-precision KV cache
-        num_blocks = kv_cache.shape[0]
-        block_size = kv_cache.shape[2]
-        num_kv_heads = kv_cache.shape[3]
-        head_dim = tq.head_dim
-        q_dtype = query.dtype
-
-        # Dequantize entire compressed cache → rotated-space fp16
-        key_cache_rot, value_cache_rot = tq.dequantize_cache(
-            kv_cache, output_dtype=q_dtype,
-        )
-        # key_cache_rot: [num_blocks, block_size, num_kv_heads, head_dim]
-
-        # -- Step 2: Rotate query --
-        q_slice = query[:num_actual_tokens]  # [T, num_heads, head_dim]
-        q_rot = tq.rotate(q_slice.float()).to(q_dtype)
-
-        # -- Step 3: Standard attention in rotated space --
-        cu_seqlens_q = attn_metadata.query_start_loc
-        descale_shape = (cu_seqlens_q.shape[0] - 1, block_size)
-        # No FP8 descaling needed — data is already in full precision
-        ones_descale = torch.ones(
-            descale_shape, device=query.device, dtype=torch.float32,
-        )
-
-        mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
-
-        unified_attention(
-            q=q_rot,
-            k=key_cache_rot,
-            v=value_cache_rot,
-            out=output[:num_actual_tokens],
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_q=attn_metadata.max_query_len,
-            seqused_k=attn_metadata.seq_lens,
-            max_seqlen_k=attn_metadata.max_seq_len,
-            softmax_scale=self.scale,
-            causal=True,
-            alibi_slopes=self.alibi_slopes,
-            use_alibi_sqrt=self.use_alibi_sqrt,
-            window_size=self.sliding_window,
-            block_table=attn_metadata.block_table,
-            softcap=self.logits_soft_cap,
-            q_descale=None,
-            k_descale=ones_descale,
-            v_descale=ones_descale,
-            seq_threshold_3D=attn_metadata.seq_threshold_3D,
-            num_par_softmax_segments=attn_metadata.num_par_softmax_segments,
-            softmax_segm_output=attn_metadata.softmax_segm_output,
-            softmax_segm_max=attn_metadata.softmax_segm_max,
-            softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
-            sinks=self.sinks,
-            output_scale=output_scale,
-            mm_prefix_range=mm_prefix_range_tensor,
-        )
-
-        # -- Step 4: Inverse-rotate the output back to original space --
-        out_slice = output[:num_actual_tokens]
-        # Reshape to [..., head_dim] for rotation, then reshape back
-        orig_shape = out_slice.shape
-        out_3d = out_slice.view(-1, self.num_heads, head_dim)
-        out_3d_rot = tq.inverse_rotate(out_3d.float()).to(q_dtype)
-        output[:num_actual_tokens] = out_3d_rot.view(orig_shape)
 
         return output
 
@@ -708,15 +584,6 @@ class TritonAttentionImpl(AttentionImpl):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
-
-        if self.is_turboquant:
-            # TurboQuant: quantize K/V and scatter-write to paged cache
-            assert self._tq_state is not None
-            self._tq_state.quantize_and_scatter(
-                key, value, kv_cache, slot_mapping
-            )
-            return
-
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
 
