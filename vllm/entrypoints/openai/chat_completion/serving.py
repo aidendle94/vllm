@@ -1375,8 +1375,14 @@ class OpenAIServingChat(OpenAIServing):
             if reasoning_parser:
                 # If the reasoning parser is enabled,
                 # tool calls are extracted exclusively from the content.
+                # Pass token_ids for parsers (e.g. Gemma4) whose
+                # start/end delimiters are special tokens stripped by
+                # skip_special_tokens=True.
+                extra_kwargs: dict[str, Any] = {}
+                if getattr(reasoning_parser, "supports_token_ids", False):
+                    extra_kwargs["token_ids"] = as_list(output.token_ids)
                 reasoning, content = reasoning_parser.extract_reasoning(
-                    output.text, request=request
+                    output.text, request=request, **extra_kwargs
                 )
                 if not request.include_reasoning:
                     reasoning = None

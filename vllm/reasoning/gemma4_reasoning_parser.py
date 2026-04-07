@@ -43,6 +43,10 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
     (``vllm.reasoning.gemma4_utils._strip_thought_label``).
     """
 
+    # Signal to the serving layer that this parser can use token IDs
+    # for non-streaming reasoning extraction.
+    supports_token_ids = True
+
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
         # Instance state for streaming prefix stripping.
@@ -71,17 +75,57 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         self,
         model_output: str,
         request: "ChatCompletionRequest | ResponsesRequest",
+        *,
+        token_ids: Sequence[int] | None = None,
     ) -> tuple[str | None, str | None]:
-        """Extract reasoning, stripping the ``thought\\n`` role label."""
-        if self.start_token not in model_output and self.end_token not in model_output:
-            # Default to content history if no tags are present
-            # (or if they were stripped)
-            return None, model_output
+        """Extract reasoning, stripping the ``thought\\n`` role label.
 
-        reasoning, content = super().extract_reasoning(model_output, request)
-        if reasoning is not None:
-            reasoning = _strip_thought_label(reasoning)
-        return reasoning, content
+        When ``skip_special_tokens=True`` (the vLLM default), the
+        ``<|channel>`` and ``<channel|>`` delimiters are stripped from
+        ``model_output`` before this method is called, making text-based
+        boundary detection impossible.  When *token_ids* is provided,
+        this method falls back to token-ID-based extraction so that
+        reasoning and content can still be separated correctly.
+        """
+        # --- Fast path: text-based matching (skip_special_tokens=False) ---
+        if self.start_token in model_output or self.end_token in model_output:
+            reasoning, content = super().extract_reasoning(model_output, request)
+            if reasoning is not None:
+                reasoning = _strip_thought_label(reasoning)
+            return reasoning, content
+
+        # --- Fallback: token-ID-based extraction (skip_special_tokens=True) ---
+        if token_ids is not None:
+            token_id_list = list(token_ids)
+            start_pos: int | None = None
+            end_pos: int | None = None
+            for i, tid in enumerate(token_id_list):
+                if tid == self.start_token_id and start_pos is None:
+                    start_pos = i
+                if tid == self.end_token_id:
+                    end_pos = i
+                    break  # use first end token
+
+            if start_pos is not None and end_pos is not None:
+                reasoning_ids = token_id_list[start_pos + 1:end_pos]
+                content_ids = token_id_list[end_pos + 1:]
+                reasoning = self.model_tokenizer.decode(
+                    reasoning_ids, skip_special_tokens=True,
+                )
+                content = (
+                    self.model_tokenizer.decode(
+                        content_ids, skip_special_tokens=True,
+                    )
+                    if content_ids
+                    else None
+                )
+                if reasoning:
+                    reasoning = _strip_thought_label(reasoning)
+                # Normalise empty strings to None for API consistency.
+                return reasoning or None, content or None
+
+        # No reasoning delimiters found at all.
+        return None, model_output
 
     # ------------------------------------------------------------------
     # Streaming path
