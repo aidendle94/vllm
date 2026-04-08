@@ -78,7 +78,7 @@ def _parse_gemma4_value(value_str: str) -> object:
     return value_str
 
 
-def _parse_gemma4_args(args_str: str) -> dict:
+def _parse_gemma4_args(args_str: str, *, streaming: bool = False) -> dict:
     """Parse Gemma4's custom key:value format into a Python dict.
 
     Format examples::
@@ -181,6 +181,11 @@ def _parse_gemma4_args(args_str: str) -> dict:
             val_start = i
             while i < n and args_str[i] not in (",", "}", "]"):
                 i += 1
+            # In streaming mode, if this bare value runs to the end of
+            # the string, it may be incomplete (e.g. "tru" -> "true").
+            # Skip it to avoid structural JSON type changes.
+            if streaming and i >= n:
+                break
             result[key] = _parse_gemma4_value(args_str[val_start:i])
 
     return result
@@ -315,9 +320,6 @@ class Gemma4ToolParser(ToolParser):
         # Streaming state — reset per-request via _reset_streaming_state()
         self._reset_streaming_state()
 
-        # Delta buffer for handling multi-token special sequences
-        self.buffered_delta_text = ""
-
     def _reset_streaming_state(self) -> None:
         """Reset all streaming state for a new request."""
         self.current_tool_id = -1
@@ -337,38 +339,6 @@ class Gemma4ToolParser(ToolParser):
             # Don't skip special tokens — <|tool_call> etc. are needed
             request.skip_special_tokens = False
         return request
-
-    # ------------------------------------------------------------------
-    # Delta buffering for multi-token special sequences
-    # ------------------------------------------------------------------
-
-    def _buffer_delta_text(self, delta_text: str) -> str:
-        """Buffer incoming delta text to handle multi-token special sequences.
-
-        Accumulates partial tokens that could be the start of
-        ``<|tool_call>`` or ``<tool_call|>`` and only flushes them
-        when the complete sequence is recognized or the sequence breaks.
-
-        This prevents partial special tokens (e.g., ``<|tool``) from being
-        emitted prematurely as content text.
-        """
-        combined = self.buffered_delta_text + delta_text
-
-        # Check if combined ends with a complete special token
-        if combined.endswith(TOOL_CALL_START) or combined.endswith(TOOL_CALL_END):
-            self.buffered_delta_text = ""
-            return combined
-
-        # Check if combined ends with a partial prefix of a special token
-        for tag in [TOOL_CALL_START, TOOL_CALL_END]:
-            for i in range(1, len(tag)):
-                if combined.endswith(tag[:i]):
-                    self.buffered_delta_text = combined[-i:]
-                    return combined[:-i]
-
-        # No partial match — flush everything
-        self.buffered_delta_text = ""
-        return combined
 
     # ------------------------------------------------------------------
     # Non-streaming extraction
@@ -434,11 +404,6 @@ class Gemma4ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        # Buffer delta text to handle multi-token special sequences
-        delta_text = self._buffer_delta_text(delta_text)
-        # Reconstruct current_text after buffering to stay in sync
-        current_text = previous_text + delta_text
-
         # If no tool call token seen yet, emit as content
         if self.tool_call_start_token not in current_text:
             if delta_text:
@@ -661,7 +626,7 @@ class Gemma4ToolParser(ToolParser):
             DeltaMessage with the argument diff, or None if no new content.
         """
         try:
-            current_args = _parse_gemma4_args(raw_args_str)
+            current_args = _parse_gemma4_args(raw_args_str, streaming=True)
         except Exception:
             logger.debug(
                 "Could not parse partial Gemma4 args yet: %s",

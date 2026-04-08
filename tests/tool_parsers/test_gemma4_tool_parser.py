@@ -531,3 +531,94 @@ class TestStreamingExtraction:
         assert "<|" not in args_text, (
             f"Partial delimiter leaked into JSON: {args_text!r}"
         )
+
+    def test_streaming_content_with_angle_brackets_no_duplication(
+        self, parser, mock_request
+    ):
+        """Content containing '<' chars must not be duplicated (#38910).
+
+        When the model streams HTML-like content (e.g. ``<head>``), the ``<``
+        character must not be doubled. Previously the buffer logic would
+        hold back ``<`` (thinking it might be a ``<|tool_call>`` prefix)
+        and then re-emit it alongside the caller's ``previous_text`` which
+        already contained it, producing ``<<headhead>``.
+        """
+        chunks = [
+            "Hello world<",
+            "head>content</",
+            "head>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        content_parts = []
+        for delta, _ in results:
+            if delta and delta.content:
+                content_parts.append(delta.content)
+
+        full_content = "".join(content_parts)
+        assert full_content == "Hello world<head>content</head>", (
+            f"Content was corrupted: {full_content!r}"
+        )
+        # Specifically check no doubled '<'
+        assert "<<" not in full_content, f"Angle bracket was doubled: {full_content!r}"
+
+    def test_streaming_partial_boolean_true(self, parser, mock_request):
+        """Partial boolean 'tru' then 'e' must produce correct true (#39089).
+
+        When ``true`` arrives as two tokens (``tru`` then ``e``), the
+        streaming parser must not corrupt the value. Previously,
+        ``_parse_gemma4_value("tru")`` returned the bare string ``"tru"``
+        which got JSON-quoted, and then ``true`` (boolean) changed the
+        JSON structure, breaking the diff logic.
+        """
+        chunks = [
+            "<|tool_call>",
+            "call:set_flag{",
+            "flag:tru",
+            "e}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        name = self._collect_function_name(results)
+        assert name == "set_flag"
+
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args == {"flag": True}, (
+            f"Expected {{'flag': true}}, got {parsed_args!r}"
+        )
+        # Must not contain corrupted value like "trutrue"
+        assert "trutrue" not in args_text, f"Boolean was corrupted: {args_text!r}"
+
+    def test_streaming_partial_number(self, parser, mock_request):
+        """Partial number '4' then '2' must produce correct 42 (#39089).
+
+        Similar to the boolean case: ``4`` alone is parsed as the integer
+        ``4``, and ``42`` is parsed as ``42``. The structural change must
+        not corrupt the output.
+        """
+        chunks = [
+            "<|tool_call>",
+            "call:set_count{",
+            "count:4",
+            "2}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        name = self._collect_function_name(results)
+        assert name == "set_count"
+
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args == {"count": 42}, (
+            f"Expected {{'count': 42}}, got {parsed_args!r}"
+        )
+        # Must not contain corrupted value like "442"
+        assert "442" not in args_text, f"Number was corrupted: {args_text!r}"

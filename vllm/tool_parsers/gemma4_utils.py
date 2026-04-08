@@ -35,8 +35,6 @@ Ported from ``transformers.models.gemma4.utils_gemma4`` so that vLLM users
 do not need a transformers dependency for output parsing.
 """
 
-import json
-
 import regex as re
 
 # Tool call delimiter tokens as they appear in decoded text.
@@ -52,42 +50,67 @@ _ESCAPE_TOKEN = '<|"|>'
 def _parse_tool_arguments(args_str: str) -> dict[str, str]:
     """Parse tool call arguments from the Gemma4 compact format.
 
-    Handles the ``key:<|"|>value<|"|>`` format used by Gemma4, with fallback
-    to heuristic key-value extraction. Also tolerates the slightly different
-    ``key: "value"`` format (space + plain quotes) that some chat templates
-    produce.
+    Handles the ``key:<|"|>value<|"|>`` format used by Gemma4.
+    Parses <|"|> delimiters directly to correctly handle values
+    containing internal quotes or other special characters.
 
     Args:
         args_str: Raw argument string from inside ``call:name{...}``.
 
     Returns:
-        Dictionary of argument name → value.
+        Dictionary of argument name → value (all values as strings).
     """
     if not args_str or not args_str.strip():
         return {}
 
-    # Replace Gemma4 escape tokens with standard quotes.
-    cleaned = args_str.replace(_ESCAPE_TOKEN, '"')
+    result: dict[str, str] = {}
+    i = 0
+    n = len(args_str)
 
-    # Try JSON parsing first (handles nested values, arrays, etc.).
-    try:
-        parsed = json.loads("{" + cleaned + "}")
-        # Ensure all values are strings for consistency.
-        return {k: str(v) if not isinstance(v, str) else v for k, v in parsed.items()}
-    except (json.JSONDecodeError, ValueError):
-        pass
+    while i < n:
+        # Skip whitespace and commas
+        while i < n and args_str[i] in (" ", ",", "\n", "\t"):
+            i += 1
+        if i >= n:
+            break
 
-    # Fallback: extract key:"value" pairs (allow optional space after colon).
-    arguments = {}
-    for key, value in re.findall(r'(\w+):\s*"([^"]*)"', cleaned):
-        arguments[key] = value
+        # Parse key (unquoted, ends at ':')
+        key_start = i
+        while i < n and args_str[i] != ":":
+            i += 1
+        if i >= n:
+            break
+        key = args_str[key_start:i].strip()
+        i += 1  # skip ':'
 
-    if not arguments:
-        # Last resort: extract key:value pairs (unquoted).
-        for key, value in re.findall(r"(\w+):\s*([^,}]+)", args_str):
-            arguments[key] = value.strip().strip('"').replace(_ESCAPE_TOKEN, "")
+        # Skip whitespace after ':'
+        while i < n and args_str[i] in (" ", "\n", "\t"):
+            i += 1
+        if i >= n:
+            result[key] = ""
+            break
 
-    return arguments
+        # String value delimited by <|"|>
+        if args_str[i:].startswith(_ESCAPE_TOKEN):
+            i += len(_ESCAPE_TOKEN)
+            end_pos = args_str.find(_ESCAPE_TOKEN, i)
+            if end_pos == -1:
+                # Unterminated string — take rest
+                result[key] = args_str[i:]
+                break
+            result[key] = args_str[i:end_pos]
+            i = end_pos + len(_ESCAPE_TOKEN)
+
+        # Bare value (number, boolean, unquoted string)
+        else:
+            val_start = i
+            while i < n and args_str[i] not in (",", "}"):
+                i += 1
+            value = args_str[val_start:i].strip()
+            # Convert to string representation for consistency
+            result[key] = value
+
+    return result
 
 
 def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
