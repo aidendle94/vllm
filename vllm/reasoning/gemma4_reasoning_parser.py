@@ -52,6 +52,9 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         # skip_special_tokens=True).
         self._reasoning_text: str = ""
         self._prefix_stripped: bool = False
+        self.new_turn_token_id = self.vocab["<|turn>"]
+        self.tool_call_token_id = self.vocab["<|tool_call>"]
+        self.tool_response_token_id = self.vocab["<|tool_response>"]
 
     @property
     def start_token(self) -> str:
@@ -63,6 +66,29 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         """The token that ends reasoning content."""
         return "<channel|>"
 
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        start_token_id = self.start_token_id
+        end_token_id = self.end_token_id
+        new_turn_token_id = self.new_turn_token_id
+        tool_call_token_id = self.tool_call_token_id
+        tool_response_token_id = self.tool_response_token_id
+
+        # Search from the end of input_ids to find the last match.
+        for i in range(len(input_ids) - 1, -1, -1):
+            if input_ids[i] == start_token_id:
+                return False
+            if input_ids[i] == tool_call_token_id:
+                # We're generating a tool call, so reasoning must be ended.
+                return True
+            if input_ids[i] in (new_turn_token_id, tool_response_token_id):
+                # We found a new turn or tool response token so don't consider
+                # reasoning ended yet, since the model starts new reasoning
+                # after these tokens.
+                return False
+            if input_ids[i] == end_token_id:
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # Request adjustment
     # ------------------------------------------------------------------
@@ -70,19 +96,8 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
     def adjust_request(
         self, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> "ChatCompletionRequest | ResponsesRequest":
-        """Force ``skip_special_tokens=False`` so that ``<|channel>`` and
-        ``<channel|>`` delimiters survive detokenization and can be used
-        by :meth:`extract_reasoning` on the non-streaming path.
-
-        This mirrors the approach used by
-        :meth:`Gemma4ToolParser.adjust_request` for tool-call delimiters.
-        """
-        from vllm.entrypoints.openai.chat_completion.protocol import (
-            ChatCompletionRequest,
-        )
-
-        if isinstance(request, ChatCompletionRequest):
-            request.skip_special_tokens = False
+        """Disable special-token stripping to preserve boundary tokens."""
+        request.skip_special_tokens = False
         return request
 
     # ------------------------------------------------------------------
@@ -181,11 +196,10 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
                     result.reasoning = stripped
                     return result
                 else:
-                    # This entire delta was prefix — suppress it.
-                    # Don't set _prefix_stripped yet; there may be more
-                    # prefix chars to consume in the next delta.
                     if len(self._reasoning_text) >= prefix_len:
                         self._prefix_stripped = True
+                        result.reasoning = ""
+                        return result
                     return None
 
         # Case 2: Accumulated text is a strict prefix of

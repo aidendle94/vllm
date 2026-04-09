@@ -6,7 +6,7 @@ import os
 from abc import abstractmethod
 from collections.abc import Callable, Iterable, Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.logger import init_logger
@@ -311,7 +311,7 @@ class ReasoningParserManager:
             if isinstance(name, str):
                 names = [name]
             elif is_list_of(name, str):
-                names = name
+                names = cast(list[str], name)
             else:
                 names = [class_name]
 

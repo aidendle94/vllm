@@ -78,7 +78,7 @@ def _parse_gemma4_value(value_str: str) -> object:
     return value_str
 
 
-def _parse_gemma4_args(args_str: str, *, streaming: bool = False) -> dict:
+def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
     """Parse Gemma4's custom key:value format into a Python dict.
 
     Format examples::
@@ -116,14 +116,16 @@ def _parse_gemma4_args(args_str: str, *, streaming: bool = False) -> dict:
 
         # Parse value
         if i >= n:
-            result[key] = ""
+            if not partial:
+                result[key] = ""
             break
 
         # Skip whitespace after ':'
         while i < n and args_str[i] in (" ", "\n", "\t"):
             i += 1
         if i >= n:
-            result[key] = ""
+            if not partial:
+                result[key] = ""
             break
 
         # String value: <|"|>...<|"|>
@@ -184,7 +186,7 @@ def _parse_gemma4_args(args_str: str, *, streaming: bool = False) -> dict:
             # In streaming mode, if this bare value runs to the end of
             # the string, it may be incomplete (e.g. "tru" -> "true").
             # Skip it to avoid structural JSON type changes.
-            if streaming and i >= n:
+            if partial and i >= n:
                 break
             result[key] = _parse_gemma4_value(args_str[val_start:i])
 
@@ -626,7 +628,7 @@ class Gemma4ToolParser(ToolParser):
             DeltaMessage with the argument diff, or None if no new content.
         """
         try:
-            current_args = _parse_gemma4_args(raw_args_str, streaming=True)
+            current_args = _parse_gemma4_args(raw_args_str, partial=True)
         except Exception:
             logger.debug(
                 "Could not parse partial Gemma4 args yet: %s",
