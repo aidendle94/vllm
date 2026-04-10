@@ -114,6 +114,19 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("key:")
         assert result == {"key": ""}
 
+    def test_empty_value_partial_withheld(self):
+        """Key with no value is withheld in partial mode to avoid premature emission."""
+        result = _parse_gemma4_args("key:", partial=True)
+        assert result == {}
+        # also with a space after the colon
+        result = _parse_gemma4_args("key: ", partial=True)
+        assert result == {}
+
+    def test_empty_value_after_other_keys_partial_withheld(self):
+        """Trailing key with no value is withheld; earlier keys are kept."""
+        result = _parse_gemma4_args('name:<|"|>test<|"|>,flag:', partial=True)
+        assert result == {"name": "test"}
+
 
 class TestParseGemma4Array:
     def test_string_array(self):
@@ -491,6 +504,51 @@ class TestStreamingExtraction:
             assert parsed_args["count"] == 42
             assert parsed_args["active"] is True
 
+    def test_streaming_boolean_split_across_chunks(self, parser, mock_request):
+        """Boolean value split across token boundaries must not corrupt JSON."""
+        chunks = [
+            "<|tool_call>",
+            "call:search{input:{all:" + "true"[:3],
+            "e}}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args["input"]["all"] is True
+
+    def test_streaming_false_split_across_chunks(self, parser, mock_request):
+        """Boolean false split across chunks."""
+        chunks = [
+            "<|tool_call>",
+            "call:set{flag:" + "false"[:4],
+            "e}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args["flag"] is False
+
+    def test_streaming_number_split_across_chunks(self, parser, mock_request):
+        """Number split across chunks must not change type."""
+        chunks = [
+            "<|tool_call>",
+            "call:set{count:4",
+            "2}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args["count"] == 42
+
     def test_streaming_empty_args(self, parser, mock_request):
         """Tool call with no arguments."""
         chunks = [
@@ -532,93 +590,89 @@ class TestStreamingExtraction:
             f"Partial delimiter leaked into JSON: {args_text!r}"
         )
 
-    def test_streaming_content_with_angle_brackets_no_duplication(
+    def test_streaming_does_not_duplicate_plain_text_after_tool_call(
+        self, parser, mock_request, monkeypatch
+    ):
+        """Buffered plain text after a tool call must not corrupt current_text."""
+        captured_current_texts: list[str] = []
+        original_extract_streaming = parser._extract_streaming
+
+        def wrapped_extract_streaming(previous_text, current_text, delta_text):
+            captured_current_texts.append(current_text)
+            return original_extract_streaming(previous_text, current_text, delta_text)
+
+        monkeypatch.setattr(parser, "_extract_streaming", wrapped_extract_streaming)
+
+        chunks = [
+            "<|tool_call>",
+            "call:get_weather{",
+            'location:<|"|>Paris<|"|>}',
+            "<tool_call|><",
+            "div>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        content_parts = [
+            delta.content for delta, _ in results if delta is not None and delta.content
+        ]
+        assert "".join(content_parts) == "<div>"
+        assert captured_current_texts[-1].endswith("<tool_call|><div>")
+        assert not captured_current_texts[-1].endswith("<tool_call|><<div>")
+
+    def test_streaming_html_argument_does_not_duplicate_tag_prefixes(
         self, parser, mock_request
     ):
-        """Content containing '<' chars must not be duplicated (#38910).
-
-        When the model streams HTML-like content (e.g. ``<head>``), the ``<``
-        character must not be doubled. Previously the buffer logic would
-        hold back ``<`` (thinking it might be a ``<|tool_call>`` prefix)
-        and then re-emit it alongside the caller's ``previous_text`` which
-        already contained it, producing ``<<headhead>``.
-        """
-        chunks = [
-            "Hello world<",
-            "head>content</",
-            "head>",
-        ]
-
-        results = self._simulate_streaming(parser, mock_request, chunks)
-
-        content_parts = []
-        for delta, _ in results:
-            if delta and delta.content:
-                content_parts.append(delta.content)
-
-        full_content = "".join(content_parts)
-        assert full_content == "Hello world<head>content</head>", (
-            f"Content was corrupted: {full_content!r}"
-        )
-        # Specifically check no doubled '<'
-        assert "<<" not in full_content, f"Angle bracket was doubled: {full_content!r}"
-
-    def test_streaming_partial_boolean_true(self, parser, mock_request):
-        """Partial boolean 'tru' then 'e' must produce correct true (#39089).
-
-        When ``true`` arrives as two tokens (``tru`` then ``e``), the
-        streaming parser must not corrupt the value. Previously,
-        ``_parse_gemma4_value("tru")`` returned the bare string ``"tru"``
-        which got JSON-quoted, and then ``true`` (boolean) changed the
-        JSON structure, breaking the diff logic.
-        """
+        """HTML content inside tool arguments must not be duplicated."""
         chunks = [
             "<|tool_call>",
-            "call:set_flag{",
-            "flag:tru",
-            "e}",
+            "call:write_file{",
+            'path:<|"|>index.html<|"|>,',
+            'content:<|"|><!DOCTYPE html>\n<',
+            'html lang="zh-CN">\n<',
+            "head>\n    <",
+            'meta charset="UTF-8">\n    <',
+            'meta name="viewport" content="width=device-width">\n',
+            '<|"|>}',
             "<tool_call|>",
         ]
 
         results = self._simulate_streaming(parser, mock_request, chunks)
-
-        name = self._collect_function_name(results)
-        assert name == "set_flag"
-
         args_text = self._collect_arguments(results)
-        assert args_text, "No arguments were streamed"
+        assert args_text
+
         parsed_args = json.loads(args_text)
-        assert parsed_args == {"flag": True}, (
-            f"Expected {{'flag': true}}, got {parsed_args!r}"
+        assert parsed_args["path"] == "index.html"
+        assert (
+            parsed_args["content"] == "<!DOCTYPE html>\n"
+            '<html lang="zh-CN">\n'
+            "<head>\n"
+            '    <meta charset="UTF-8">\n'
+            '    <meta name="viewport" content="width=device-width">\n'
         )
-        # Must not contain corrupted value like "trutrue"
-        assert "trutrue" not in args_text, f"Boolean was corrupted: {args_text!r}"
 
-    def test_streaming_partial_number(self, parser, mock_request):
-        """Partial number '4' then '2' must produce correct 42 (#39089).
-
-        Similar to the boolean case: ``4`` alone is parsed as the integer
-        ``4``, and ``42`` is parsed as ``42``. The structural change must
-        not corrupt the output.
-        """
+    def test_streaming_trailing_bare_bool_not_duplicated(self, parser, mock_request):
+        """Trailing bare boolean must not be streamed twice."""
         chunks = [
             "<|tool_call>",
-            "call:set_count{",
-            "count:4",
-            "2}",
+            "call:Edit{",
+            'file_path:<|"|>src/env.py<|"|>,',
+            'old_string:<|"|>old_val<|"|>,',
+            'new_string:<|"|>new_val<|"|>,',
+            "replace_all:",
+            "false}",
             "<tool_call|>",
         ]
 
         results = self._simulate_streaming(parser, mock_request, chunks)
-
-        name = self._collect_function_name(results)
-        assert name == "set_count"
-
         args_text = self._collect_arguments(results)
         assert args_text, "No arguments were streamed"
+
         parsed_args = json.loads(args_text)
-        assert parsed_args == {"count": 42}, (
-            f"Expected {{'count': 42}}, got {parsed_args!r}"
-        )
-        # Must not contain corrupted value like "442"
-        assert "442" not in args_text, f"Number was corrupted: {args_text!r}"
+        assert parsed_args == {
+            "file_path": "src/env.py",
+            "old_string": "old_val",
+            "new_string": "new_val",
+            "replace_all": False,
+        }
+
+        assert args_text.count("replace_all") == 1

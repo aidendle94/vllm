@@ -204,7 +204,7 @@
     {%- if message['role'] != 'tool' -%}
     {%- set ns.prev_message_type = None -%}
     {%- set role = 'model' if message['role'] == 'assistant' else message['role'] -%}
-    {#- OpenAI may emit multiple assistant messages in one tool loop (user -> asst -> tool -> asst -> tool).
+    {#- OpenAI may emit multiple assistant messages in one tool loop (user → asst → tool → asst → tool).
         Only the first of those should open <|turn>model; later ones continue the same model turn. -#}
     {%- set prev_nt = namespace(role=None, found=false) -%}
     {%- if loop.index0 > 0 -%}

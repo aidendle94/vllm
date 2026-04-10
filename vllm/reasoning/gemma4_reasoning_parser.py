@@ -56,6 +56,13 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         self.tool_call_token_id = self.vocab["<|tool_call>"]
         self.tool_response_token_id = self.vocab["<|tool_response>"]
 
+    def adjust_request(
+        self, request: "ChatCompletionRequest | ResponsesRequest"
+    ) -> "ChatCompletionRequest | ResponsesRequest":
+        """Disable special-token stripping to preserve boundary tokens."""
+        request.skip_special_tokens = False
+        return request
+
     @property
     def start_token(self) -> str:
         """The token that starts reasoning content."""
@@ -88,17 +95,6 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
             if input_ids[i] == end_token_id:
                 return True
         return False
-
-    # ------------------------------------------------------------------
-    # Request adjustment
-    # ------------------------------------------------------------------
-
-    def adjust_request(
-        self, request: "ChatCompletionRequest | ResponsesRequest"
-    ) -> "ChatCompletionRequest | ResponsesRequest":
-        """Disable special-token stripping to preserve boundary tokens."""
-        request.skip_special_tokens = False
-        return request
 
     # ------------------------------------------------------------------
     # Non-streaming path
@@ -142,14 +138,14 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         prefix is present, then emit the buffered content minus the
         prefix.
 
-        This method uses instance state (``_reasoning_text``) to track
-        only the reasoning content returned by the base parser, rather
-        than reconstructing it from ``current_text``.  Although
-        ``adjust_request`` now forces ``skip_special_tokens=False``
-        (making ``<|channel>`` visible in ``current_text``), the
-        instance-state approach remains more robust against edge cases
-        where pre-reasoning content could interfere with prefix
-        stripping.
+        Unlike the previous implementation which reconstructed accumulated
+        reasoning from ``current_text``, this uses instance state
+        (``_reasoning_text``) to track only the reasoning content returned
+        by the base parser. This is necessary because
+        ``skip_special_tokens=True`` (the vLLM default) causes the
+        ``<|channel>`` delimiter to be invisible in ``current_text``,
+        making it impossible to separate pre-reasoning content from
+        reasoning content via string matching.
         """
         result = super().extract_reasoning_streaming(
             previous_text,

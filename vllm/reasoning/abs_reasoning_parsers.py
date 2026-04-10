@@ -39,18 +39,19 @@ class ReasoningParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
-    def adjust_request(
-        self, request: "ChatCompletionRequest | ResponsesRequest"
-    ) -> "ChatCompletionRequest | ResponsesRequest":
-        """Adjust request parameters before inference.
-
-        Subclasses can override this to modify request settings
-        (e.g. forcing ``skip_special_tokens=False`` when the parser
-        relies on special-token delimiters surviving detokenization).
-
-        The default implementation is a no-op.
+    @property
+    def reasoning_start_str(self) -> str | None:
+        """Set `reasoning_start_str` to the strings that delimit
+        the reasoning block (e.g. `""<seed:think>""` and `"<think>"`).
         """
-        return request
+        return None
+
+    @property
+    def reasoning_end_str(self) -> str | None:
+        """Set `reasoning_end_str` to the strings that delimit
+        the reasoning block (e.g. `""</seed:think>""` and `"</think>"`).
+        """
+        return None
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
@@ -162,6 +163,12 @@ class ReasoningParser:
         the current tokens/diffs, but also the information about what has
         previously been parsed and extracted (see constructor)
         """
+
+    def adjust_request(
+        self, request: "ChatCompletionRequest | ResponsesRequest"
+    ) -> "ChatCompletionRequest | ResponsesRequest":
+        """Adjust request parameters; override in subclasses as needed."""
+        return request
 
     def prepare_structured_tag(
         self,

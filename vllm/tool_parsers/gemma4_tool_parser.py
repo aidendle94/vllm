@@ -89,6 +89,12 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
         nested:{inner_key:<|"|>val<|"|>}
         items:[<|"|>a<|"|>,<|"|>b<|"|>]
 
+    Args:
+        args_str: The raw Gemma4 argument string.
+        partial: When True (streaming), bare values at end of string are
+            omitted because they may be incomplete and type-unstable
+            (e.g. partial boolean parsed as bare string).
+
     Returns a dict ready for ``json.dumps()``.
     """
     if not args_str or not args_str.strip():
@@ -157,7 +163,12 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                 elif args_str[i] == "}":
                     depth -= 1
                 i += 1
-            result[key] = _parse_gemma4_args(args_str[obj_start : i - 1])
+            if depth > 0:
+                # Incomplete nested object — use i (not i-1) to avoid
+                # dropping the last char, and recurse as partial.
+                result[key] = _parse_gemma4_args(args_str[obj_start:i], partial=True)
+            else:
+                result[key] = _parse_gemma4_args(args_str[obj_start : i - 1])
 
         # Array: [...]
         elif args_str[i] == "[":
@@ -175,25 +186,26 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                 elif args_str[i] == "]":
                     depth -= 1
                 i += 1
-            arr_content = args_str[arr_start : i - 1]
-            result[key] = _parse_gemma4_array(arr_content)
+            if depth > 0:
+                result[key] = _parse_gemma4_array(args_str[arr_start:i], partial=True)
+            else:
+                result[key] = _parse_gemma4_array(args_str[arr_start : i - 1])
 
         # Bare value (number, boolean, etc.)
         else:
             val_start = i
             while i < n and args_str[i] not in (",", "}", "]"):
                 i += 1
-            # In streaming mode, if this bare value runs to the end of
-            # the string, it may be incomplete (e.g. "tru" -> "true").
-            # Skip it to avoid structural JSON type changes.
             if partial and i >= n:
+                # Value may be incomplete (e.g. partial boolean) —
+                # withhold to avoid type instability during streaming.
                 break
             result[key] = _parse_gemma4_value(args_str[val_start:i])
 
     return result
 
 
-def _parse_gemma4_array(arr_str: str) -> list:
+def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
     """Parse a Gemma4 array content string into a Python list."""
     items: list = []
     i = 0
@@ -231,7 +243,10 @@ def _parse_gemma4_array(arr_str: str) -> list:
                 elif arr_str[i] == "}":
                     depth -= 1
                 i += 1
-            items.append(_parse_gemma4_args(arr_str[obj_start : i - 1]))
+            if depth > 0:
+                items.append(_parse_gemma4_args(arr_str[obj_start:i], partial=True))
+            else:
+                items.append(_parse_gemma4_args(arr_str[obj_start : i - 1]))
 
         # Nested array
         elif arr_str[i] == "[":
@@ -244,13 +259,18 @@ def _parse_gemma4_array(arr_str: str) -> list:
                 elif arr_str[i] == "]":
                     depth -= 1
                 i += 1
-            items.append(_parse_gemma4_array(arr_str[sub_start : i - 1]))
+            if depth > 0:
+                items.append(_parse_gemma4_array(arr_str[sub_start:i], partial=True))
+            else:
+                items.append(_parse_gemma4_array(arr_str[sub_start : i - 1]))
 
         # Bare value
         else:
             val_start = i
             while i < n and arr_str[i] not in (",", "]"):
                 i += 1
+            if partial and i >= n:
+                break
             items.append(_parse_gemma4_value(arr_str[val_start:i]))
 
     return items
@@ -322,6 +342,9 @@ class Gemma4ToolParser(ToolParser):
         # Streaming state — reset per-request via _reset_streaming_state()
         self._reset_streaming_state()
 
+        # Delta buffer for handling multi-token special sequences
+        self.buffered_delta_text = ""
+
     def _reset_streaming_state(self) -> None:
         """Reset all streaming state for a new request."""
         self.current_tool_id = -1
@@ -341,6 +364,38 @@ class Gemma4ToolParser(ToolParser):
             # Don't skip special tokens — <|tool_call> etc. are needed
             request.skip_special_tokens = False
         return request
+
+    # ------------------------------------------------------------------
+    # Delta buffering for multi-token special sequences
+    # ------------------------------------------------------------------
+
+    def _buffer_delta_text(self, delta_text: str) -> str:
+        """Buffer incoming delta text to handle multi-token special sequences.
+
+        Accumulates partial tokens that could be the start of
+        ``<|tool_call>`` or ``<tool_call|>`` and only flushes them
+        when the complete sequence is recognized or the sequence breaks.
+
+        This prevents partial special tokens (e.g., ``<|tool``) from being
+        emitted prematurely as content text.
+        """
+        combined = self.buffered_delta_text + delta_text
+
+        # Check if combined ends with a complete special token
+        if combined.endswith(TOOL_CALL_START) or combined.endswith(TOOL_CALL_END):
+            self.buffered_delta_text = ""
+            return combined
+
+        # Check if combined ends with a partial prefix of a special token
+        for tag in [TOOL_CALL_START, TOOL_CALL_END]:
+            for i in range(1, len(tag)):
+                if combined.endswith(tag[:i]):
+                    self.buffered_delta_text = combined[-i:]
+                    return combined[:-i]
+
+        # No partial match — flush everything
+        self.buffered_delta_text = ""
+        return combined
 
     # ------------------------------------------------------------------
     # Non-streaming extraction
@@ -406,6 +461,13 @@ class Gemma4ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
+        # Buffer delta text to handle multi-token special sequences
+        delta_text = self._buffer_delta_text(delta_text)
+        # Keep current_text from the upstream stream state. The buffered delta
+        # is only for emission, and must not be stitched back into the
+        # accumulated model text or normal content like "<div>" can be
+        # duplicated into "<<div>" when a tool call just ended.
+
         # If no tool call token seen yet, emit as content
         if self.tool_call_start_token not in current_text:
             if delta_text:
